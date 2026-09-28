@@ -245,6 +245,30 @@ func uint8b(b []byte) uint8 {
 
 var shardRe = regexp.MustCompile(`^(.+)-(\d{5})-of-(\d{5})\.gguf$`)
 
+// ReadModel reads a model's metadata and the tensor-info tables of all its
+// shards. In a llama.cpp split model each shard lists only its own tensors,
+// so reading just the first one sees a fraction of the weights. path may be
+// any shard, or a single-file model.
+func ReadModel(path string) (*Metadata, error) {
+	shards, err := FindShards(path)
+	if err != nil {
+		return nil, err
+	}
+	meta, err := ReadWithTensors(shards[0])
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range shards[1:] {
+		m, err := ReadWithTensors(s)
+		if err != nil {
+			return nil, fmt.Errorf("shard %s: %w", filepath.Base(s), err)
+		}
+		meta.Tensors = append(meta.Tensors, m.Tensors...)
+		meta.NTensors += m.NTensors
+	}
+	return meta, nil
+}
+
 // FindShards resolves llama.cpp's `name-00001-of-00004.gguf` split naming to
 // the full list of sibling shard paths. Returns just the input path if it
 // doesn't look like a split file.

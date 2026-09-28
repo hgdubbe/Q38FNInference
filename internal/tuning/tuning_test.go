@@ -93,11 +93,11 @@ func TestPartialOffloadPinsExpertsAndUsesTrailingSlots(t *testing.T) {
 }
 
 func TestMultiGPUSplitsBySlotBytes(t *testing.T) {
-	// 6 blocks x (500 MiB experts + 100 MiB shared) + 100 MiB output = 3.7 GiB
+	// 6 blocks x (500 MiB experts + 100 MiB shared) + 100 MiB output
 	m := synthModel(6, 500*MiB, 100*MiB, 100*MiB)
 	gpus := []GPU{
-		{Index: 0, Name: "a", FreeBytes: overhead(true) + 1300*MiB},  // 2 blocks
-		{Index: 2, Name: "b", FreeBytes: overhead(false) + 2600*MiB}, // 4 blocks + output
+		{Index: 0, Name: "small", FreeBytes: overhead(false) + 1300*MiB},
+		{Index: 2, Name: "big", FreeBytes: overhead(true) + 2600*MiB},
 	}
 	p, err := Compute(m, gpus, Options{})
 	if err != nil {
@@ -106,15 +106,45 @@ func TestMultiGPUSplitsBySlotBytes(t *testing.T) {
 	if !p.FullyOnGPU {
 		t.Fatalf("expected full fit across two GPUs, got %+v", p)
 	}
-	if !slices.Equal(p.TensorSplit, []int{2, 5}) {
-		t.Errorf("TensorSplit = %v, want [2 5]", p.TensorSplit)
+	// the bigger GPU leads (main device), taking 4 blocks; the small one
+	// takes the last 2 blocks plus the output layer
+	if !slices.Equal(p.Devices, []int{2, 0}) {
+		t.Errorf("Devices = %v, want [2 0]", p.Devices)
 	}
-	if !slices.Equal(p.Devices, []int{0, 2}) {
-		t.Errorf("Devices = %v, want [0 2]", p.Devices)
+	if !slices.Equal(p.TensorSplit, []int{4, 3}) {
+		t.Errorf("TensorSplit = %v, want [4 3]", p.TensorSplit)
 	}
 	args := p.Args("m.gguf")
-	if !slices.Contains(args, "--tensor-split") || !slices.Contains(args, "2,5") {
-		t.Errorf("args %v missing --tensor-split 2,5", args)
+	if !slices.Contains(args, "--tensor-split") || !slices.Contains(args, "4,3") {
+		t.Errorf("args %v missing --tensor-split 4,3", args)
+	}
+}
+
+func TestLargeSplitModelPinsExpertsAcrossTwoGPUs(t *testing.T) {
+	// roughly the reported setup: ~64 GiB of weights, 48 blocks, an 8 GB
+	// and a 16 GB card listed in that order
+	m := synthModel(48, 1300*MiB, 60*MiB, 600*MiB)
+	gpus := []GPU{
+		{Index: 0, Name: "RTX 3050", FreeBytes: 7900 * MiB},
+		{Index: 1, Name: "RTX 4070 Ti SUPER", FreeBytes: 14700 * MiB},
+	}
+	p, err := Compute(m, gpus, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Devices[0] != 1 {
+		t.Errorf("Devices = %v, want the 16 GB card first", p.Devices)
+	}
+	if p.NGpuLayers != 49 || p.NCPUMoE < 30 || p.NCPUMoE >= 48 {
+		t.Errorf("ngl=%d ncmoe=%d; want all slots on GPU with most experts in RAM", p.NGpuLayers, p.NCPUMoE)
+	}
+	for d, b := range p.DeviceBytes {
+		if b > gpus[1-d].FreeBytes { // DeviceBytes follow Devices order
+			t.Errorf("device %d planned %d MiB, more than it has", p.Devices[d], b/MiB)
+		}
+	}
+	if p.GPUFitBytes+p.CPUFitBytes != p.TotalBytes {
+		t.Errorf("bytes don't add up: %d + %d != %d", p.GPUFitBytes, p.CPUFitBytes, p.TotalBytes)
 	}
 }
 

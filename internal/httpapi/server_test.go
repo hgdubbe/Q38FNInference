@@ -3,9 +3,13 @@ package httpapi
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/hgdubbe/q38fninference/internal/gguf"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -62,5 +66,22 @@ func TestStripFlags(t *testing.T) {
 	got := stripFlags([]string{"--model", "m", "--port", "1", "--host", "0.0.0.0", "--temp", "0.5"}, "--host", "--port")
 	if want := []string{"--model", "m", "--temp", "0.5"}; !slices.Equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestSizeCheckFlagsUndercount(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "m.gguf")
+	if err := os.WriteFile(p, make([]byte, 10000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 256 f32 elements = 1024 bytes of tensors vs a 10000-byte file
+	meta := &gguf.Metadata{Tensors: []gguf.TensorInfo{{Name: "x", Dims: []uint64{256}, Type: 0}}}
+	if note := sizeCheck(p, meta); !strings.Contains(note, "underestimates") {
+		t.Errorf("sizeCheck = %q, want an undercount warning", note)
+	}
+	meta.Tensors[0].Dims = []uint64{2400} // 9600 bytes: within 10%
+	if note := sizeCheck(p, meta); note != "" {
+		t.Errorf("sizeCheck = %q, want no warning", note)
 	}
 }

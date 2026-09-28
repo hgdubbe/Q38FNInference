@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -369,7 +370,7 @@ type tuneResponse struct {
 }
 
 func (s *Server) tune(modelPath string) (*tuneResponse, error) {
-	meta, err := gguf.ReadWithTensors(modelPath)
+	meta, err := gguf.ReadModel(modelPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", modelPath, err)
 	}
@@ -386,7 +387,36 @@ func (s *Server) tune(modelPath string) (*tuneResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	if note := sizeCheck(modelPath, meta); note != "" {
+		plan.Notes = append(plan.Notes, note)
+	}
 	return &tuneResponse{Plan: plan, Args: append(plan.Args(modelPath), ms.Args()...)}, nil
+}
+
+// sizeCheck flags a plan built from fewer tensor bytes than the model files
+// hold, so an undercount shows up as a warning instead of an OOM at load.
+func sizeCheck(modelPath string, meta *gguf.Metadata) string {
+	shards, err := gguf.FindShards(modelPath)
+	if err != nil {
+		return ""
+	}
+	var files uint64
+	for _, p := range shards {
+		if fi, err := os.Stat(p); err == nil {
+			files += uint64(fi.Size())
+		}
+	}
+	var tensors uint64
+	for _, t := range meta.Tensors {
+		if n, ok := t.SizeBytes(); ok {
+			tensors += n
+		}
+	}
+	if files == 0 || tensors >= files*9/10 {
+		return ""
+	}
+	return fmt.Sprintf("warning: the model files hold %.1f GiB but only %.1f GiB of tensors were recognized; this plan likely underestimates memory",
+		float64(files)/(1<<30), float64(tensors)/(1<<30))
 }
 
 func (s *Server) handleTune(w http.ResponseWriter, r *http.Request) {

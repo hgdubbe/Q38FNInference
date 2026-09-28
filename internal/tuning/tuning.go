@@ -22,6 +22,7 @@ package tuning
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 
 	"github.com/hgdubbe/q38fninference/internal/gguf"
@@ -94,8 +95,9 @@ func (s slot) bytes(expertsOnGPU bool) uint64 {
 	return b
 }
 
-// Compute builds a plan for a model read with gguf.ReadWithTensors. gpus
-// are the devices the user allowed, in the order llama.cpp will see them.
+// Compute builds a plan for a model read with gguf.ReadModel. gpus are the
+// devices the user allowed; Plan.Devices is the order llama-server must see
+// them in (via CUDA_VISIBLE_DEVICES), largest free memory first.
 func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 	nLayer64, ok := m.NLayer()
 	if !ok || nLayer64 == 0 {
@@ -171,6 +173,19 @@ func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 		plan.CPUFitBytes = plan.TotalBytes
 		return plan, nil
 	}
+
+	// The first device is llama.cpp's main GPU (logits, compute buffers) and
+	// takes the first slots, so lead with the one that has the most room.
+	gpus = slices.Clone(gpus)
+	slices.SortStableFunc(gpus, func(a, b GPU) int {
+		switch {
+		case a.FreeBytes > b.FreeBytes:
+			return -1
+		case a.FreeBytes < b.FreeBytes:
+			return 1
+		}
+		return 0
+	})
 
 	budgets := make([]int64, len(gpus))
 	for d, g := range gpus {

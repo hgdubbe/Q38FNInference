@@ -201,3 +201,35 @@ func TestFindShardsNonSplit(t *testing.T) {
 		t.Errorf("got %v", got)
 	}
 }
+
+func TestReadModelMergesShards(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, withArch bool, tensor string) {
+		b := newGGUFBuilder()
+		if withArch {
+			b.strKV("general.architecture", "qwen4exp")
+			b.u32KV("qwen4exp.block_count", 2)
+		}
+		b.tensor(tensor, []uint64{256}, typeF32, 0)
+		if err := os.WriteFile(filepath.Join(dir, name), b.bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("m-00001-of-00002.gguf", true, "blk.0.attn_q.weight")
+	write("m-00002-of-00002.gguf", false, "blk.1.attn_q.weight")
+
+	for _, p := range []string{"m-00001-of-00002.gguf", "m-00002-of-00002.gguf"} {
+		m, err := ReadModel(filepath.Join(dir, p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(m.Tensors) != 2 || m.Arch() != "qwen4exp" {
+			t.Errorf("ReadModel(%s): %d tensors, arch %q; want 2 and qwen4exp", p, len(m.Tensors), m.Arch())
+		}
+	}
+
+	os.Remove(filepath.Join(dir, "m-00002-of-00002.gguf"))
+	if _, err := ReadModel(filepath.Join(dir, "m-00001-of-00002.gguf")); err == nil {
+		t.Error("expected an error for a missing shard")
+	}
+}

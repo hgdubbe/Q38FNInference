@@ -25,6 +25,8 @@ on:
 env:
   # patches/*.patch are verified against this commit; bump both together
   LLAMA_CPP_REF: ${{ github.event.inputs.llama_cpp_ref || '6c7a87f7e5e5cd75b8a641c3471f2dee84a6ed17' }}
+  # bump when the llama.cpp build flags below change, to invalidate the cache
+  LLAMA_CACHE_VERSION: "1"
   CMAKE_ARGS: "-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON"
 
 permissions:
@@ -39,7 +41,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           path: launcher
-      - uses: actions/checkout@v6
+
+      # llama.cpp only changes with the pinned ref or the patches, so
+      # launcher-only releases reuse the previous build
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: llama-out
+          key: llama-cpu-${{ env.LLAMA_CACHE_VERSION }}-${{ env.LLAMA_CPP_REF }}-${{ hashFiles('launcher/patches/**') }}
+
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v6
         with:
           repository: ggml-org/llama.cpp
           ref: ${{ env.LLAMA_CPP_REF }}
@@ -47,14 +59,17 @@ jobs:
           fetch-depth: 0 # build-info needs the commit count
 
       - name: Apply patches
+        if: steps.cache.outputs.cache-hit != 'true'
         shell: bash
         working-directory: llama.cpp
         run: for p in ../launcher/patches/*.patch; do git apply --verbose "$p"; done
 
       - name: Install Ninja
+        if: steps.cache.outputs.cache-hit != 'true'
         run: choco install ninja -y
 
       - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
         shell: cmd
         working-directory: llama.cpp
         run: |
@@ -70,11 +85,12 @@ jobs:
             ${{ env.CMAKE_ARGS }}
           cmake --build build --config Release
           copy LICENSE build\bin\Release\LICENSE-llama.cpp.txt
+          xcopy /E /I /Y build\bin\Release ..\llama-out
 
       - uses: actions/upload-artifact@v6
         with:
           name: llama-cpu
-          path: llama.cpp/build/bin/Release/*
+          path: llama-out/*
           if-no-files-found: error
 
   llama-cuda:
@@ -85,27 +101,39 @@ jobs:
       - uses: actions/checkout@v6
         with:
           path: launcher
-      - uses: actions/checkout@v6
+
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: out
+          key: llama-cuda-${{ env.LLAMA_CACHE_VERSION }}-${{ env.LLAMA_CPP_REF }}-${{ hashFiles('launcher/patches/**') }}
+
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v6
         with:
           repository: ggml-org/llama.cpp
           ref: ${{ env.LLAMA_CPP_REF }}
           path: llama.cpp
 
       - name: Apply patches
+        if: steps.cache.outputs.cache-hit != 'true'
         shell: bash
         working-directory: llama.cpp
         run: for p in ../launcher/patches/*.patch; do git apply --verbose "$p"; done
 
       - name: Install CUDA Toolkit
+        if: steps.cache.outputs.cache-hit != 'true'
         uses: ./llama.cpp/.github/actions/windows-setup-cuda
         with:
           cuda_version: "12.4"
           cuda_arch: x64
 
       - name: Install Ninja
+        if: steps.cache.outputs.cache-hit != 'true'
         run: choco install ninja -y
 
       - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
         shell: cmd
         working-directory: llama.cpp
         run: |
@@ -121,6 +149,7 @@ jobs:
           cmake --build build --config Release -j %NINJA_JOBS% --target ggml-cuda
 
       - name: Collect ggml-cuda.dll + CUDA runtime
+        if: steps.cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
@@ -141,6 +170,8 @@ jobs:
     name: Launcher (Go)
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release]')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -158,6 +189,20 @@ jobs:
           name: launcher
           path: q38fninference.exe
           if-no-files-found: error
+
+      # the launcher is ready in minutes; don't hold it back for the CUDA build
+      - name: Publish launcher to the release early
+        if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then tag="$GITHUB_REF_NAME"; else tag="v$(tr -d '[:space:]' < VERSION)"; fi
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+      - if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: Q38FNInference ${{ env.TAG }}
+          files: q38fninference.exe
 
   package:
     name: Package
