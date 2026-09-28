@@ -8,14 +8,18 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/hgdubbe/q38fninference/internal/proc"
 )
 
 // Status is a snapshot of the managed process's state.
 type Status struct {
 	Running   bool
+	Ready     bool // model loaded and serving (set by the caller's health check)
 	PID       int
 	StartedAt time.Time
 	Args      []string
@@ -45,9 +49,9 @@ func NewManager(logCapLines int) *Manager {
 	}
 }
 
-// Start launches binPath with args. Returns an error if a process is already
-// running (call Stop first) or the binary fails to start.
-func (m *Manager) Start(binPath string, args []string) error {
+// Start launches binPath with args and extra environment variables. Returns
+// an error if a process is already running or the binary fails to start.
+func (m *Manager) Start(binPath string, args []string, env ...string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -56,6 +60,8 @@ func (m *Manager) Start(binPath string, args []string) error {
 	}
 
 	cmd := exec.Command(binPath, args...)
+	cmd.Env = append(os.Environ(), env...)
+	proc.Hide(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -90,7 +96,12 @@ func (m *Manager) pump(r io.Reader) {
 func (m *Manager) wait(cmd *exec.Cmd) {
 	err := cmd.Wait()
 	m.mu.Lock()
+	if m.cmd != cmd {
+		m.mu.Unlock()
+		return
+	}
 	m.status.Running = false
+	m.status.Ready = false
 	if err != nil {
 		m.status.ExitErr = err.Error()
 		m.appendLogLocked(fmt.Sprintf("[launcher] server exited: %v", err))
@@ -137,6 +148,15 @@ func (m *Manager) StopWithTimeout(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// MarkReady records that the process with this PID finished loading.
+func (m *Manager) MarkReady(pid int) {
+	m.mu.Lock()
+	if m.status.Running && m.status.PID == pid {
+		m.status.Ready = true
+	}
+	m.mu.Unlock()
 }
 
 // Status returns a snapshot of the current process state.

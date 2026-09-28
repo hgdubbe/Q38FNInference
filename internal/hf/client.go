@@ -152,7 +152,12 @@ func (c *Client) SearchModels(ctx context.Context, query string, limit int) ([]M
 
 // FileURL is the direct download URL for one file in a repo's main revision.
 func (c *Client) FileURL(repo, filename string) string {
-	return fmt.Sprintf("%s/%s/resolve/main/%s", c.baseURL(), repo, url.PathEscape(filename))
+	// GGUF repos often keep split quants in subfolders: escape per segment
+	segs := strings.Split(filename, "/")
+	for i, seg := range segs {
+		segs[i] = url.PathEscape(seg)
+	}
+	return fmt.Sprintf("%s/%s/resolve/main/%s", c.baseURL(), repo, strings.Join(segs, "/"))
 }
 
 // Progress is called periodically during Download with the bytes downloaded

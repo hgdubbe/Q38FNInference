@@ -12,27 +12,29 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hgdubbe/q38fninference/internal/proc"
 	"github.com/hgdubbe/q38fninference/internal/tuning"
 )
 
-// Detect runs `nvidia-smi --query-gpu=... --format=csv,noheader,nounits` and
-// returns one tuning.GPU per device. Returns an empty (non-nil-error) slice,
-// not an error, when nvidia-smi isn't on PATH (e.g. no NVIDIA driver) so
-// callers can fall back to CPU-only without special-casing.
+// Detect runs nvidia-smi and returns one tuning.GPU per device, ordered by
+// nvidia-smi index (PCI bus order; llama-server is started with
+// CUDA_DEVICE_ORDER=PCI_BUS_ID so its device numbering matches). Returns an
+// empty slice, not an error, when nvidia-smi isn't on PATH.
 func Detect() ([]tuning.GPU, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "nvidia-smi",
-		"--query-gpu=name,memory.free,memory.total",
+		"--query-gpu=index,memory.free,memory.total,name",
 		"--format=csv,noheader,nounits",
 	)
+	proc.Hide(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		if isNotFound(err) {
+		if _, ok := err.(*exec.Error); ok {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("nvidia-smi: %w (%s)", err, strings.TrimSpace(stderr.String()))
@@ -48,24 +50,25 @@ func parseNvidiaSMI(out string) ([]tuning.GPU, error) {
 		if line == "" {
 			continue
 		}
-		fields := strings.Split(line, ",")
-		if len(fields) != 3 {
+		// name last and SplitN, so a name containing commas stays intact
+		fields := strings.SplitN(line, ",", 4)
+		if len(fields) != 4 {
 			return nil, fmt.Errorf("unexpected nvidia-smi output line: %q", line)
 		}
-		name := strings.TrimSpace(fields[0])
-		freeMiB, err := strconv.ParseUint(strings.TrimSpace(fields[1]), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("parsing free memory in %q: %w", line, err)
+		var nums [3]uint64
+		for i := range nums {
+			n, err := strconv.ParseUint(strings.TrimSpace(fields[i]), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("parsing %q: %w", line, err)
+			}
+			nums[i] = n
 		}
 		gpus = append(gpus, tuning.GPU{
-			Name:      name,
-			FreeBytes: freeMiB * tuning.MiB,
+			Index:      int(nums[0]),
+			FreeBytes:  nums[1] * tuning.MiB,
+			TotalBytes: nums[2] * tuning.MiB,
+			Name:       strings.TrimSpace(fields[3]),
 		})
 	}
 	return gpus, nil
-}
-
-func isNotFound(err error) bool {
-	_, ok := err.(*exec.Error)
-	return ok // binary not found / not executable on PATH
 }

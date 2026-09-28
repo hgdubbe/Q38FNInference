@@ -4,33 +4,96 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Q38FNInference</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%273%27 fill=%27%235b8cff%27/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
   <h1>Q38FNInference</h1>
   <span class="sub">Qwen3.8-Flash-Next launcher</span>
+  <span id="hdr-status" class="pill">stopped</span>
+  <span class="spacer"></span>
+  <button id="quit" class="secondary" title="Stop the model and exit the launcher">Quit</button>
 </header>
 
 <nav id="tabs">
-  <button class="tab-btn active" data-tab="models">Models</button>
-  <button class="tab-btn" data-tab="run">Run</button>
+  <button class="tab-btn active" data-tab="run">Run</button>
+  <button class="tab-btn" data-tab="chat">Chat</button>
+  <button class="tab-btn" data-tab="models">Models</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
 </nav>
 
 <main>
-  <section id="tab-models" class="tab-panel active">
+  <section id="tab-run" class="tab-panel active">
+    <div class="panel">
+      <h2>Model</h2>
+      <div id="selected-model" class="hint">No model selected — pick one in the Models tab.</div>
+    </div>
+
+    <div class="panel">
+      <h2>GPUs</h2>
+      <div id="gpu-list" class="list"><div class="hint">Detecting…</div></div>
+      <p class="hint">Unticked GPUs are hidden from llama-server. Selection is saved.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Launch plan</h2>
+      <div id="tune-plan" class="hint">Select a model to compute an offload plan.</div>
+      <label class="block">llama-server arguments (editable)
+        <textarea id="tune-args" rows="4" spellcheck="false"></textarea>
+      </label>
+      <div class="row">
+        <button id="retune" class="secondary">Recompute plan</button>
+        <button id="start-server">Start</button>
+        <button id="stop-server" class="danger">Stop</button>
+        <span id="server-status" class="hint"></span>
+      </div>
+      <div class="row" id="server-links">
+        <span class="hint">API: <code id="api-url"></code></span>
+        <button id="open-webui" class="secondary">Open llama.cpp web UI</button>
+      </div>
+      <div id="api-error" class="error"></div>
+    </div>
+
+    <div class="panel">
+      <h3>llama-server log</h3>
+      <pre id="server-log" class="log"></pre>
+    </div>
+  </section>
+
+  <section id="tab-chat" class="tab-panel">
+    <div class="panel chat">
+      <div id="chat-log"></div>
+      <div class="hint" id="chat-sys"></div>
+      <div class="row">
+        <textarea id="chat-input" rows="3" placeholder="Message… (Enter to send, Shift+Enter for newline)"></textarea>
+      </div>
+      <div class="row">
+        <button id="chat-send">Send</button>
+        <button id="chat-stop" class="secondary">Stop</button>
+        <button id="chat-clear" class="secondary">Clear</button>
+        <label class="inline"><input type="checkbox" id="chat-stream" checked> stream</label>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-models" class="tab-panel">
     <div class="panel">
       <h2>Local models</h2>
-      <p class="hint">Scanned from the Hugging Face cache and this app's models folder.</p>
+      <p class="hint">Found in the Hugging Face cache, this app's models folder, and the extra folders in Settings.</p>
       <div id="local-models" class="list"></div>
-      <button id="refresh-local">Refresh</button>
+      <button id="refresh-local" class="secondary">Refresh</button>
     </div>
 
     <div class="panel">
       <h2>Download from Hugging Face</h2>
       <div class="row">
-        <input id="hf-repo" placeholder="Qwen/Qwen3.8-Flash-Next" value="Qwen/Qwen3.8-Flash-Next">
+        <input id="hf-query" placeholder="search, e.g. Qwen3.8-Flash-Next GGUF">
+        <button id="hf-search" class="secondary">Search</button>
+      </div>
+      <div id="hf-results" class="list"></div>
+      <div class="row">
+        <input id="hf-repo" placeholder="org/repo" value="Qwen/Qwen3.8-Flash-Next">
         <button id="hf-list-files">List GGUF files</button>
       </div>
       <div id="hf-files" class="list"></div>
@@ -42,54 +105,79 @@
     </div>
   </section>
 
-  <section id="tab-run" class="tab-panel">
-    <div class="panel">
-      <h2>Selected model</h2>
-      <div id="selected-model" class="hint">No model selected — pick one from the Models tab.</div>
-    </div>
-
-    <div class="panel">
-      <h2>GPU</h2>
-      <div id="gpu-info" class="hint">Detecting…</div>
-    </div>
-
-    <div class="panel">
-      <h2>Launch plan</h2>
-      <div id="tune-plan" class="hint">Select a model to compute an offload plan.</div>
-      <div class="row">
-        <label>Context size override: <input id="ctx-override" type="number" placeholder="auto"></label>
-        <button id="retune">Recompute</button>
-      </div>
-      <pre id="tune-args"></pre>
-    </div>
-
-    <div class="panel">
-      <div class="row">
-        <button id="start-server">Start server</button>
-        <button id="stop-server">Stop server</button>
-        <span id="server-status" class="hint"></span>
-      </div>
-      <div class="row" id="server-links" style="display:none">
-        <a id="link-webui" target="_blank">Open web UI</a>
-        <a id="link-api" target="_blank">OpenAI API docs</a>
-      </div>
-      <h3>Log</h3>
-      <pre id="server-log" class="log"></pre>
-    </div>
-  </section>
-
   <section id="tab-settings" class="tab-panel">
+    <form id="settings-form" autocomplete="off">
     <div class="panel">
-      <h2>Settings</h2>
-      <div class="row"><label>llama-server path <input id="cfg-bin" placeholder="auto-detect"></label></div>
-      <div class="row"><label>Port <input id="cfg-port" type="number"></label></div>
-      <div class="row"><label>Hugging Face token <input id="cfg-token" type="password" placeholder="optional, for gated repos"></label></div>
-      <div class="row"><label>Extra model directories (one per line)
-        <textarea id="cfg-dirs" rows="3"></textarea>
-      </label></div>
-      <button id="save-settings">Save</button>
+      <h2>System prompt</h2>
+      <p class="hint">Applied by the launcher's API proxy to every chat request — this panel, llama.cpp's web UI and external API clients.</p>
+      <div class="row">
+        <label>Mode
+          <select name="system_prompt_mode">
+            <option value="off">off</option>
+            <option value="default">default (only if the request has none)</option>
+            <option value="override">override (replace the request's)</option>
+          </select>
+        </label>
+      </div>
+      <textarea name="system_prompt" rows="5" class="wide"></textarea>
+    </div>
+
+    <div class="panel">
+      <h2>Model</h2>
+      <p class="hint">Leave blank for llama.cpp's defaults. Changes apply on the next Start.</p>
+      <div class="grid">
+        <label>Context size <input name="model.ctx_size" type="number" min="0" placeholder="auto (≤65536)"></label>
+        <label>Parallel slots <input name="model.parallel" type="number" min="1" placeholder="1"></label>
+        <label>KV cache type
+          <select name="model.cache_type">
+            <option value="">q8_0 (default)</option>
+            <option>f16</option><option>q8_0</option><option>q5_1</option><option>q5_0</option><option>q4_1</option><option>q4_0</option>
+          </select>
+        </label>
+        <label>Max tokens <input name="model.max_tokens" type="number" placeholder="unlimited"></label>
+        <label>Temperature <input name="model.temperature" type="number" step="0.05" placeholder="0.8"></label>
+        <label>Top-p <input name="model.top_p" type="number" step="0.01" placeholder="0.95"></label>
+        <label>Top-k <input name="model.top_k" type="number" placeholder="40"></label>
+        <label>Min-p <input name="model.min_p" type="number" step="0.01" placeholder="0.05"></label>
+        <label>Repeat penalty <input name="model.repeat_penalty" type="number" step="0.01" placeholder="1.0"></label>
+        <label>Presence penalty <input name="model.presence_penalty" type="number" step="0.1" placeholder="0.0"></label>
+        <label>Seed <input name="model.seed" type="number" placeholder="random"></label>
+        <label>Reasoning
+          <select name="model.reasoning">
+            <option value="">auto</option><option>on</option><option>off</option>
+          </select>
+        </label>
+        <label>CPU threads <input name="model.threads" type="number" min="0" placeholder="auto"></label>
+        <label>Batch size <input name="model.batch_size" type="number" min="0" placeholder="2048"></label>
+        <label>Micro-batch size <input name="model.ubatch_size" type="number" min="0" placeholder="512"></label>
+        <label>Model alias <input name="model.alias" placeholder="model file name"></label>
+        <label>API key <input name="model.api_key" type="password" placeholder="none"></label>
+      </div>
+      <label class="block">Extra llama-server arguments <input name="model.extra_args" class="wide" placeholder="--mlock --no-mmap"></label>
+    </div>
+
+    <div class="panel">
+      <h2>App</h2>
+      <div class="grid">
+        <label>API port <input name="port" type="number" min="1" max="65535"></label>
+        <label>API bind address
+          <select name="api_host">
+            <option value="127.0.0.1">127.0.0.1 (this PC)</option>
+            <option value="0.0.0.0">0.0.0.0 (LAN)</option>
+          </select>
+        </label>
+        <label class="inline"><input type="checkbox" name="open_chat_on_ready"> open llama.cpp web UI when a model is ready</label>
+      </div>
+      <label class="block">llama-server path <input name="llama_server_path" class="wide" placeholder="auto-detect (next to this app, llama\ subfolder, or PATH)"></label>
+      <label class="block">Hugging Face token <input name="hf_token" type="password" class="wide" placeholder="optional, for gated repos"></label>
+      <label class="block">Extra model folders (one per line) <textarea name="extra_model_dirs" rows="3" class="wide"></textarea></label>
+      <p class="hint">Port and bind address changes take effect after restarting the launcher.</p>
+    </div>
+    <div class="row">
+      <button type="submit">Save settings</button>
       <span id="settings-status" class="hint"></span>
     </div>
+    </form>
   </section>
 </main>
 

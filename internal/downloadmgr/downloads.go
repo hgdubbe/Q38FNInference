@@ -50,17 +50,26 @@ func NewManager(client *hf.Client) *Manager {
 }
 
 // Start begins downloading repo/filename to destPath in the background and
-// returns its tracking ID immediately.
+// returns its tracking snapshot immediately. Starting a file that is already
+// downloading returns the existing transfer rather than racing on its .part.
 func (m *Manager) Start(ctx context.Context, repo, filename, destPath string) *Download {
 	m.mu.Lock()
+	for _, d := range m.byID {
+		if d.DestPath == destPath && (d.State == StatePending || d.State == StateActive) {
+			cp := *d
+			m.mu.Unlock()
+			return &cp
+		}
+	}
 	m.next++
 	id := fmt.Sprintf("dl-%d", m.next)
 	d := &Download{ID: id, Repo: repo, Filename: filename, DestPath: destPath, State: StatePending, StartedAt: time.Now()}
 	m.byID[id] = d
+	cp := *d
 	m.mu.Unlock()
 
 	go m.run(ctx, d)
-	return d
+	return &cp
 }
 
 func (m *Manager) run(ctx context.Context, d *Download) {

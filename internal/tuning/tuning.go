@@ -1,267 +1,386 @@
 // Package tuning turns a parsed GGUF model (see internal/gguf) plus detected
-// GPU memory into a concrete llama-server command line, tailored to the
-// qwen4exp (Qwen3.8-Flash-Next) hybrid MoE + gated-delta-net/QSA-attention
-// architecture.
+// GPU memory into a concrete llama-server offload configuration, tailored to
+// the qwen4exp (Qwen3.8-Flash-Next) hybrid MoE + gated-delta-net/QSA
+// architecture, on one or several GPUs.
 //
-// Upstream llama.cpp already ships the mechanism this needs (`--n-cpu-moe`,
-// see tools/server/README.md), but decides nothing on its own: the user picks
-// -ngl/-ncmoe by hand, and the generic `--fit` auto-planner (common/fit.cpp)
-// does not yet account for this architecture's recurrent/SSM cache or its
-// PLE n-gram hash table (see docs/ARCHITECTURE.md). This package fills that
-// gap by reading the model's real per-tensor sizes and picking the minimal
-// "keep first N layers' experts on CPU" split that fits the detected VRAM,
-// with headroom held back for the KV cache/compute buffers.
+// It reproduces llama.cpp's own placement rules (src/llama-model.cpp,
+// load_tensors) so the plan is exact rather than proportional guesswork:
+//   - the input layer (token_embd) always stays on CPU;
+//   - there are n_layer+1 offloadable slots: every block plus the output
+//     layer; -ngl k puts the LAST k slots on GPUs;
+//   - --tensor-split c0,c1,... assigns those GPU slots to devices in order,
+//     by cumulative proportion, so passing slot counts places exactly c_d
+//     consecutive slots on device d;
+//   - --n-cpu-moe N pins the MoE expert tensors of blocks 0..N-1 to CPU RAM,
+//     wherever the rest of the block lives.
+//
+// Each slot's GPU cost is its weights (minus experts if pinned) plus its
+// share of the context cache: KV + indexer keys for full (QSA) attention
+// blocks, conv + delta-rule state for gated-delta-net blocks.
 package tuning
 
 import (
 	"fmt"
 	"regexp"
-	"sort"
+	"strconv"
 
 	"github.com/hgdubbe/q38fninference/internal/gguf"
 )
 
-// MiB and GiB are byte-count constants for readability.
 const (
 	MiB = 1024 * 1024
 	GiB = 1024 * MiB
 )
 
+// GPU is one detected accelerator. Index is the nvidia-smi / PCI-bus-order
+// index, used for CUDA_VISIBLE_DEVICES.
+type GPU struct {
+	Index      int
+	Name       string
+	FreeBytes  uint64
+	TotalBytes uint64
+}
+
 // Plan is the computed launch configuration and the reasoning behind it.
 type Plan struct {
-	NGpuLayers  int    // -ngl
-	NCPUMoE     int    // --n-cpu-moe (0 if not applicable/needed)
-	CtxSize     uint64 // --ctx-size
-	FlashAttn   bool   // --flash-attn
-	CacheTypeKV string // --cache-type-k / --cache-type-v
+	NGpuLayers  int      // -ngl (slots, incl. the output layer)
+	NCPUMoE     int      // --n-cpu-moe
+	TensorSplit []int    // --tensor-split, slot count per device (multi-GPU only)
+	Devices     []int    // GPU indices used, in llama.cpp device order
+	DeviceNames []string // for display
+	DeviceBytes []uint64 // estimated bytes placed on each device
+	CtxSize     uint64
+	Parallel    int
+	FlashAttn   bool
+	CacheTypeKV string
 	Notes       []string
-	GPUFitBytes uint64 // estimated bytes placed on GPU
-	CPUFitBytes uint64 // estimated bytes left on CPU
+	GPUFitBytes uint64
+	CPUFitBytes uint64
 	TotalBytes  uint64
 	FullyOnGPU  bool
 }
 
-// GPU describes one detected accelerator's memory, in bytes.
-type GPU struct {
-	Name      string
-	FreeBytes uint64
-}
-
 // Options lets the caller override what would otherwise be auto-picked.
 type Options struct {
-	// RequestedCtx, if non-zero, is used verbatim instead of the auto default.
-	RequestedCtx uint64
-	// ReserveBytes is headroom subtracted from free VRAM for the KV cache,
-	// compute buffers and CUDA context overhead. Zero means "pick a sane
-	// default based on context size".
+	RequestedCtx uint64 // 0 = auto (native context, capped)
+	Parallel     int    // server slots; recurrent state scales with it. 0 = 1
+	CacheType    string // KV cache type; "" = q8_0
+	// ReserveBytes is extra safety headroom kept free on every GPU on top
+	// of the modelled CUDA context and compute buffers. 0 = 512 MiB.
 	ReserveBytes uint64
 }
 
-var expertTensorRe = regexp.MustCompile(`^blk\.(\d+)\.ffn_(gate|up|down)_exps(\.weight)?$`)
+// llama.cpp's LLM_FFN_EXPS_REGEX (common/common.h), anchored to a block index.
+var expertTensorRe = regexp.MustCompile(`^blk\.(\d+)\.ffn_(up|down|gate|gate_up)_(ch|)exps`)
 var layerTensorRe = regexp.MustCompile(`^blk\.(\d+)\.`)
+var inputTensorRe = regexp.MustCompile(`^(token_embd|pos_embd|token_types|per_layer_token_embd)\.`)
 
-type layerBytes struct {
-	expert uint64
-	shared uint64
+const (
+	cudaContextBytes  = 512 * MiB // CUDA context + cuBLAS workspace, per device
+	computeMainBytes  = 1 * GiB   // compute buffer on the first GPU (holds logits)
+	computeOtherBytes = 256 * MiB
+	defaultCtxCap     = 65536
+)
+
+type slot struct {
+	shared, expert, cache uint64
 }
 
-// Plan computes a launch plan for a model whose tensor list has already been
-// read (gguf.ReadWithTensors). gpus should be sorted GPU-0-first; only the
-// first (largest-priority) device is used for now — see docs/ARCHITECTURE.md
-// TODO for multi-GPU tensor-split support.
+func (s slot) bytes(expertsOnGPU bool) uint64 {
+	b := s.shared + s.cache
+	if expertsOnGPU {
+		b += s.expert
+	}
+	return b
+}
+
+// Compute builds a plan for a model read with gguf.ReadWithTensors. gpus
+// are the devices the user allowed, in the order llama.cpp will see them.
 func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
-	nLayer, ok := m.NLayer()
-	if !ok || nLayer == 0 {
+	nLayer64, ok := m.NLayer()
+	if !ok || nLayer64 == 0 {
 		return nil, fmt.Errorf("model is missing %s.block_count", m.Arch())
 	}
+	n := int(nLayer64)
+	if opt.Parallel <= 0 {
+		opt.Parallel = 1
+	}
+	if opt.CacheType == "" {
+		opt.CacheType = "q8_0"
+	}
+	if opt.ReserveBytes == 0 {
+		opt.ReserveBytes = 512 * MiB
+	}
 
-	layers := make([]layerBytes, nLayer)
-	var globalBytes uint64
-	var sizedTensors, unsizedTensors int
+	ctx := pickCtx(m, opt)
+	slots := make([]slot, n+1) // slots[n] is the output layer
+	var inputBytes uint64
+	var sized, unsized int
 
 	for _, t := range m.Tensors {
 		sz, ok := t.SizeBytes()
 		if !ok {
-			unsizedTensors++
+			unsized++
 			continue
 		}
-		sizedTensors++
-
+		sized++
 		if em := expertTensorRe.FindStringSubmatch(t.Name); em != nil {
-			il := mustAtoi(em[1])
-			if il < len(layers) {
-				layers[il].expert += sz
-			} else {
-				globalBytes += sz
+			if il, err := strconv.Atoi(em[1]); err == nil && il < n {
+				slots[il].expert += sz
+				continue
 			}
-			continue
 		}
 		if lm := layerTensorRe.FindStringSubmatch(t.Name); lm != nil {
-			il := mustAtoi(lm[1])
-			if il < len(layers) {
-				layers[il].shared += sz
-			} else {
-				globalBytes += sz
+			if il, err := strconv.Atoi(lm[1]); err == nil && il < n {
+				slots[il].shared += sz
+				continue
 			}
+		}
+		if inputTensorRe.MatchString(t.Name) {
+			inputBytes += sz
 			continue
 		}
-		globalBytes += sz
+		slots[n].shared += sz
 	}
 
-	var totalBytes uint64 = globalBytes
-	for _, l := range layers {
-		totalBytes += l.expert + l.shared
+	cacheNote := addCacheBytes(m, slots[:n], ctx, opt)
+
+	plan := &Plan{
+		CtxSize:     ctx,
+		Parallel:    opt.Parallel,
+		CacheTypeKV: opt.CacheType,
+		TotalBytes:  inputBytes,
+	}
+	for _, s := range slots {
+		plan.TotalBytes += s.bytes(true)
+	}
+	if cacheNote != "" {
+		plan.Notes = append(plan.Notes, cacheNote)
+	}
+	if unsized > 0 {
+		plan.Notes = append(plan.Notes, fmt.Sprintf("%d tensor(s) use a quant type this launcher doesn't know; they were left out of the sizing", unsized))
 	}
 
-	plan := &Plan{TotalBytes: totalBytes}
-	if sizedTensors == 0 {
-		plan.Notes = append(plan.Notes, "model has no tensor-info section loaded (call gguf.ReadWithTensors); falling back to CPU-only defaults")
-		plan.NGpuLayers = 0
-		plan.NCPUMoE = 0
-		plan.CtxSize = pickCtx(m, opt)
-		plan.FlashAttn = true
-		plan.CacheTypeKV = "q8_0"
+	if sized == 0 || len(gpus) == 0 {
+		if sized == 0 {
+			plan.Notes = append(plan.Notes, "model tensor sizes unavailable; running CPU-only")
+		} else {
+			plan.Notes = append(plan.Notes, "no usable GPU selected; running CPU-only")
+		}
+		plan.CacheTypeKV = "f16"
+		plan.CPUFitBytes = plan.TotalBytes
 		return plan, nil
 	}
-	if unsizedTensors > 0 {
-		plan.Notes = append(plan.Notes, fmt.Sprintf("%d tensor(s) used an unrecognized quant type and were excluded from sizing; the plan below may be slightly optimistic", unsizedTensors))
+
+	budgets := make([]int64, len(gpus))
+	for d, g := range gpus {
+		compute := uint64(computeOtherBytes)
+		if d == 0 {
+			compute = computeMainBytes
+		}
+		budgets[d] = int64(g.FreeBytes) - int64(cudaContextBytes+compute+opt.ReserveBytes)
+		plan.Devices = append(plan.Devices, g.Index)
+		plan.DeviceNames = append(plan.DeviceNames, g.Name)
 	}
 
-	var freeBytes uint64
-	var gpuName string
-	if len(gpus) > 0 {
-		freeBytes = gpus[0].FreeBytes
-		gpuName = gpus[0].Name
+	// Phase 1: every slot on GPU; pin as few blocks' experts to CPU as needed.
+	nCPUMoE, k := -1, n+1
+	for N := 0; N <= n; N++ {
+		if _, ok := place(slots, N, k, budgets); ok {
+			nCPUMoE = N
+			break
+		}
+	}
+	// Phase 2: even all experts on CPU don't fit; offload as many trailing
+	// slots as possible (experts stay pinned, since they can't fit anyway).
+	if nCPUMoE < 0 {
+		nCPUMoE = n
+		for k = n; k > 0; k-- {
+			if _, ok := place(slots, nCPUMoE, k, budgets); ok {
+				break
+			}
+		}
 	}
 
-	if freeBytes == 0 {
-		plan.Notes = append(plan.Notes, "no GPU with usable free memory detected; running CPU-only")
-		plan.NGpuLayers = 0
-		plan.NCPUMoE = 0
-		plan.CtxSize = pickCtx(m, opt)
+	counts, _ := place(slots, nCPUMoE, k, budgets)
+	plan.NGpuLayers = k
+	plan.NCPUMoE = nCPUMoE
+	plan.FlashAttn = true
+	plan.DeviceBytes = make([]uint64, len(gpus))
+
+	first := n + 1 - k
+	j := first
+	for d, c := range counts {
+		for i := 0; i < c; i++ {
+			plan.DeviceBytes[d] += slots[j].bytes(j >= nCPUMoE)
+			j++
+		}
+		plan.GPUFitBytes += plan.DeviceBytes[d]
+	}
+	plan.CPUFitBytes = plan.TotalBytes - plan.GPUFitBytes
+	if len(gpus) > 1 {
+		plan.TensorSplit = counts
+	}
+	plan.FullyOnGPU = k == n+1 && nCPUMoE == 0
+
+	switch {
+	case plan.FullyOnGPU:
+		plan.Notes = append(plan.Notes, "all weights and cache fit on GPU")
+	case k == n+1:
+		plan.Notes = append(plan.Notes, fmt.Sprintf("MoE experts of the first %d/%d blocks stay in CPU RAM; attention, gated-delta-net and shared weights are all on GPU", nCPUMoE, n))
+	case k == 0:
+		plan.Notes = append(plan.Notes, "the GPU(s) can't hold even one block's non-expert weights plus cache; running CPU-only")
 		plan.FlashAttn = false
 		plan.CacheTypeKV = "f16"
-		plan.CPUFitBytes = totalBytes
-		return plan, nil
-	}
-
-	ctx := pickCtx(m, opt)
-	reserve := opt.ReserveBytes
-	if reserve == 0 {
-		reserve = reserveForCtx(ctx)
-	}
-	budget := int64(freeBytes) - int64(reserve)
-	if budget < 0 {
-		budget = 0
-	}
-
-	// prefixShared[i] = sum of shared/attn bytes for layers [0, i)
-	// suffixExpert[i] = sum of expert bytes for layers [i, n) -- what stays
-	// on GPU if the first i layers' experts are pinned to CPU (n-cpu-moe=i).
-	prefixShared := make([]uint64, nLayer+1)
-	suffixExpert := make([]uint64, nLayer+1)
-	for i := uint64(0); i < nLayer; i++ {
-		prefixShared[i+1] = prefixShared[i] + layers[i].shared
-	}
-	for i := int(nLayer) - 1; i >= 0; i-- {
-		suffixExpert[i] = suffixExpert[i+1] + layers[i].expert
-	}
-
-	fixedAllLayers := int64(globalBytes) + int64(prefixShared[nLayer])
-
-	if fixedAllLayers <= budget {
-		// every layer offloads to GPU; find the minimal n-cpu-moe (fewest
-		// experts pinned to CPU) that still fits.
-		n := sort.Search(int(nLayer)+1, func(n int) bool {
-			return fixedAllLayers+int64(suffixExpert[n]) <= budget
-		})
-		plan.NGpuLayers = int(nLayer)
-		plan.NCPUMoE = n
-		plan.FullyOnGPU = n == 0
-		plan.GPUFitBytes = uint64(fixedAllLayers) + suffixExpert[n]
-		plan.CPUFitBytes = totalBytes - plan.GPUFitBytes
-		if n == 0 {
-			plan.Notes = append(plan.Notes, fmt.Sprintf("model fits entirely on %s with headroom to spare", gpuName))
-		} else {
-			plan.Notes = append(plan.Notes, fmt.Sprintf("keeping MoE expert weights of the first %d/%d layers on CPU RAM to fit %s (all attention/GDN/shared weights stay on GPU)", n, nLayer, gpuName))
-		}
-	} else {
-		// Even with every expert on CPU, the dense per-layer weights alone
-		// don't fit: fall back to partial layer offload (classic -ngl < n_layer).
-		k := sort.Search(int(nLayer)+1, func(k int) bool {
-			return int64(globalBytes)+int64(prefixShared[k]) > budget
-		})
-		if k > 0 {
-			k--
-		}
-		plan.NGpuLayers = k
-		plan.NCPUMoE = 0
-		plan.GPUFitBytes = globalBytes + prefixShared[k]
-		plan.CPUFitBytes = totalBytes - plan.GPUFitBytes
+	default:
 		plan.Notes = append(plan.Notes,
-			fmt.Sprintf("%s is too small to hold even the non-expert weights of all %d layers; offloading only %d/%d layers to GPU", gpuName, nLayer, k, nLayer),
-			"expect noticeably slower generation: most of this model's compute is happening on CPU",
-		)
+			fmt.Sprintf("GPU memory is too small for every block's non-expert weights: offloading the last %d of %d slots, all experts in CPU RAM", k, n+1),
+			"expect slow generation: most compute runs on CPU")
 	}
-
-	plan.CtxSize = ctx
-	plan.FlashAttn = true
-	plan.CacheTypeKV = "q8_0"
+	if len(gpus) > 1 {
+		for d, c := range counts {
+			if c == 0 {
+				plan.Notes = append(plan.Notes, fmt.Sprintf("%s got no layers; consider deselecting it", gpus[d].Name))
+			}
+		}
+	}
 	return plan, nil
 }
 
-// pickCtx picks a default context size when the caller didn't request one:
-// the model's native training context, capped to a testing-friendly size so
-// a first run doesn't reserve hundreds of MiB of KV cache nobody asked for.
+// place packs the last k slots (with experts of blocks < nCPUMoE on CPU)
+// into devices in order, filling each as far as it goes, the way contiguous
+// --tensor-split ranges must be laid out. Greedy fill is optimal for
+// feasibility of an ordered contiguous partition.
+func place(slots []slot, nCPUMoE, k int, budgets []int64) ([]int, bool) {
+	counts := make([]int, len(budgets))
+	first := len(slots) - k
+	d := 0
+	var used int64
+	for j := first; j < len(slots); j++ {
+		need := int64(slots[j].bytes(j >= nCPUMoE))
+		for d < len(budgets) && used+need > budgets[d] {
+			d++
+			used = 0
+		}
+		if d == len(budgets) {
+			return nil, false
+		}
+		used += need
+		counts[d]++
+	}
+	return counts, true
+}
+
+// addCacheBytes charges every block its context-cache memory, from GGUF
+// metadata. Estimates are deliberately on the high side: KV compression
+// ratios on QSA layers are ignored, and recurrent state is counted at f32.
+func addCacheBytes(m *gguf.Metadata, blocks []slot, ctx uint64, opt Options) string {
+	kvElem := cacheElemBytes(opt.CacheType)
+	recr := m.RecurrentLayers()
+	keyLen, _ := m.Uint("attention.key_length")
+	valLen, _ := m.Uint("attention.value_length")
+	idxHeads, _ := m.Uint("attention.indexer.head_count")
+	idxKeyLen, _ := m.Uint("attention.indexer.key_length")
+
+	dConv, _ := m.Uint("ssm.conv_kernel")
+	dInner, _ := m.Uint("ssm.inner_size")
+	dState, _ := m.Uint("ssm.state_size")
+	nGroup, _ := m.Uint("ssm.group_count")
+	var recrPerSeq uint64
+	if dInner > 0 && dState > 0 {
+		var conv uint64
+		if dConv > 0 {
+			conv = (dConv - 1) * (dInner + 2*nGroup*dState)
+		}
+		recrPerSeq = (conv + dState*dInner) * 4
+	}
+
+	var missingKV bool
+	for il := range blocks {
+		if il < len(recr) && recr[il] {
+			blocks[il].cache += recrPerSeq * uint64(opt.Parallel)
+			continue
+		}
+		nKV := m.HeadCountKV(il)
+		if nKV == 0 || keyLen == 0 {
+			missingKV = true
+			continue
+		}
+		v := valLen
+		if v == 0 {
+			v = keyLen
+		}
+		perToken := float64(nKV*(keyLen+v)) * kvElem
+		perToken += float64(idxHeads*idxKeyLen) * kvElem
+		blocks[il].cache += uint64(perToken * float64(ctx))
+	}
+	if missingKV {
+		return "attention head metadata missing for some layers; their KV cache is not included in the plan"
+	}
+	return ""
+}
+
+func cacheElemBytes(t string) float64 {
+	switch t {
+	case "f32":
+		return 4
+	case "q8_0":
+		return 34.0 / 32
+	case "q4_0", "iq4_nl":
+		return 18.0 / 32
+	case "q4_1":
+		return 20.0 / 32
+	case "q5_0":
+		return 22.0 / 32
+	case "q5_1":
+		return 24.0 / 32
+	default: // f16, bf16
+		return 2
+	}
+}
+
+// pickCtx: the model's native context, capped so a first run doesn't
+// reserve cache for 262k tokens nobody asked for.
 func pickCtx(m *gguf.Metadata, opt Options) uint64 {
 	if opt.RequestedCtx != 0 {
 		return opt.RequestedCtx
 	}
-	const defaultCap = 65536
 	trained, ok := m.NCtxTrain()
-	if !ok || trained == 0 {
-		return defaultCap
+	if !ok || trained == 0 || trained > defaultCtxCap {
+		return defaultCtxCap
 	}
-	if trained < defaultCap {
-		return trained
-	}
-	return defaultCap
+	return trained
 }
 
-// reserveForCtx estimates headroom for KV cache + compute buffers. This is
-// deliberately conservative (see docs/ARCHITECTURE.md: llama.cpp's own
-// --fit estimator doesn't yet model this arch's recurrent-state/PLE memory,
-// so we'd rather leave VRAM on the table than OOM mid-load).
-func reserveForCtx(ctx uint64) uint64 {
-	base := uint64(1) * GiB
-	// rough per-token compute-buffer scaling; generous on purpose.
-	perToken := uint64(64 * 1024) // 64 KiB/token
-	return base + ctx*perToken
-}
-
-// Args renders the plan as llama-server CLI arguments.
+// Args renders the offload part of the plan as llama-server CLI arguments.
 func (p *Plan) Args(modelPath string) []string {
 	args := []string{
 		"--model", modelPath,
-		"--ctx-size", fmt.Sprint(p.CtxSize),
-		"--n-gpu-layers", fmt.Sprint(p.NGpuLayers),
+		"--ctx-size", strconv.FormatUint(p.CtxSize, 10),
+		"--n-gpu-layers", strconv.Itoa(p.NGpuLayers),
+		"--parallel", strconv.Itoa(max(p.Parallel, 1)),
+		"--fit", "off",
 	}
-	if p.NCPUMoE > 0 {
-		args = append(args, "--n-cpu-moe", fmt.Sprint(p.NCPUMoE))
+	if p.NCPUMoE > 0 && p.NGpuLayers > 0 {
+		args = append(args, "--n-cpu-moe", strconv.Itoa(p.NCPUMoE))
+	}
+	if len(p.TensorSplit) > 1 {
+		s := ""
+		for i, c := range p.TensorSplit {
+			if i > 0 {
+				s += ","
+			}
+			s += strconv.Itoa(c)
+		}
+		args = append(args, "--split-mode", "layer", "--tensor-split", s)
 	}
 	if p.FlashAttn {
 		args = append(args, "--flash-attn", "on")
+	} else {
+		args = append(args, "--flash-attn", "off")
 	}
 	if p.CacheTypeKV != "" {
 		args = append(args, "--cache-type-k", p.CacheTypeKV, "--cache-type-v", p.CacheTypeKV)
 	}
 	return args
-}
-
-func mustAtoi(s string) int {
-	n := 0
-	for _, c := range s {
-		n = n*10 + int(c-'0')
-	}
-	return n
 }

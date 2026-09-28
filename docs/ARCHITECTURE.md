@@ -71,20 +71,39 @@ Two places:
    for this architecture. This was checked with `git apply --check` against
    upstream at the commit noted in the patch header.
 
-2. **`internal/tuning`** — this is the real "optimize for this model's
-   architecture" work, done at the launcher level instead of inside
-   llama.cpp's C++:
-   - Reads the GGUF's actual per-tensor sizes (`internal/gguf`, verified
-     against `sizeof(block_*)` compiled straight out of
-     `ggml/src/ggml-common.h`, not hand-computed) rather than guessing from
-     total file size.
-   - Splits each layer's tensors into "MoE expert" (`blk.N.ffn_*_exps`) vs.
-     "everything else" (attention, GDN state, hyper-connections, the PLE
-     table on its one layer) buckets.
-   - Picks the smallest `--n-cpu-moe` value (fewest layers' experts pinned to
-     CPU RAM) that fits the detected free VRAM with headroom, falling back
-     to partial `-ngl` layer offload if even the non-expert weights don't
-     fit a small GPU.
+2. **`internal/tuning`**: the offload planner. It reproduces llama.cpp's
+   own placement rules from `load_tensors` in `src/llama-model.cpp` so the
+   plan is exact:
+   - `token_embd` (the input layer) always stays on CPU.
+   - There are `n_layer + 1` offloadable slots (every block plus the output
+     layer), and `-ngl k` puts the *last* k of them on GPUs.
+   - `--tensor-split` assigns those slots to devices in order by cumulative
+     proportion, so passing slot counts (e.g. `2,5`) places exactly that many
+     consecutive slots on each GPU.
+   - `--n-cpu-moe N` pins the expert tensors of blocks `0..N-1`
+     (`ffn_{up,down,gate,gate_up}_exps`, the same regex llama.cpp uses) to
+     CPU RAM wherever the rest of the block lives.
+
+   Each slot costs its weights (real per-tensor sizes, from `sizeof(block_*)`
+   compiled out of `ggml/src/ggml-common.h`) plus its share of the context
+   cache, from GGUF metadata: KV and indexer keys for full (QSA) attention
+   blocks, conv and delta-rule state for gated-delta-net blocks, per parallel
+   slot. Each GPU's budget is its free memory minus the CUDA context, compute
+   buffers (larger on the first GPU, which holds the logits) and a safety
+   margin.
+
+   The planner then picks the smallest `--n-cpu-moe` for which all slots pack
+   into the selected GPUs in order (greedy filling is optimal for an ordered
+   contiguous split). If even with every expert in RAM the dense weights
+   don't fit, it offloads as many trailing slots as fit, with all experts
+   pinned, so GPU-resident blocks never drag their experts onto the GPU.
+   Several GPUs pool their memory, which is what lets a 176B-total/6B-active
+   model keep far more experts on GPU than any single card could.
+
+   GPUs are selected with `CUDA_VISIBLE_DEVICES`, and llama-server runs with
+   `CUDA_DEVICE_ORDER=PCI_BUS_ID` so its device numbering matches
+   `nvidia-smi`'s. The plan is passed with `--fit off`, since llama.cpp's
+   `--fit` would otherwise try to re-plan.
 
    We didn't build this into llama.cpp's own `--fit` auto-planner
    (`common/fit.cpp`) because that estimator currently has **zero
@@ -96,20 +115,29 @@ Two places:
    architecture is exactly the kind of change this project chose not to
    guess at. See `TODO.md`.
 
-## Why the launcher doesn't build its own OpenAI API or web chat UI
+## API, web UI and system prompt
 
-`llama-server` (built by this project's CI/scripts) already ships:
+`llama-server` already provides the OpenAI-compatible API
+(`/v1/chat/completions`, `/v1/completions`, `/v1/models`, ...; streaming and
+non-streaming), an Anthropic-style `/v1/messages`, and a web UI. The launcher
+doesn't reimplement any of that. It starts llama-server on a private loopback
+port and puts a reverse proxy (`internal/proxy`) on the public API port
+(8080 by default), because llama-server has no system-prompt option. For
+`/v1/chat/completions`, `/chat/completions` and `/v1/messages`, the proxy
+either adds the configured system prompt when a request has none
+("default") or replaces the request's system/developer messages
+("override"). Everything else, including SSE streams, passes through
+unchanged. llama-server's web UI is also served through the proxy, so the
+prompt applies there too.
 
-- A full OpenAI-compatible API (`/v1/chat/completions`, `/v1/completions`,
-  `/v1/models`, ...) with both streaming (SSE) and non-streaming responses.
-- A web UI for interactive testing, served at `/`.
+The control panel (`internal/httpapi`, port 8787) hosts model management,
+the offload plan, settings, and a small chat tab that talks to the same
+proxy.
 
-Reimplementing either would just be a second, less-tested copy of code
-llama.cpp's own maintainers already ship and test. This project's own web
-UI (`internal/httpapi`) is a separate, smaller thing: a local control panel
-for picking/downloading a model, computing an offload plan, and starting/
-stopping the `llama-server` child process — it links to llama-server's own
-web UI and API once the process is running, rather than duplicating them.
+The release exe is linked as a Windows GUI program (`-H windowsgui`): no
+console window, child processes are started hidden, logs go to
+`launcher.log`, and starting a second copy just reopens the running
+instance's panel.
 
 ## Known limitations / open questions
 
@@ -119,8 +147,12 @@ web UI and API once the process is running, rather than duplicating them.
   HTTP/download plumbing all have unit tests that build and pass in that
   environment; the llama.cpp build pipeline and CUDA kernels are upstream's
   own, exercised by their CI, not this project's.
-- `internal/tuning` currently plans for a single GPU. Multi-GPU tensor-split
-  is a reasonable follow-up (see `TODO.md`).
+- The cache estimates are deliberately high (QSA KV compression ratios are
+  ignored, recurrent state is counted at f32) and the compute buffer sizes
+  are fixed guesses. Expect the plan to leave some VRAM unused rather than
+  run out.
+- Multi-GPU uses `--split-mode layer` only; `row`/`tensor` modes are not
+  planned for.
 - The qwen4exp graph implementation is explicitly WIP upstream; re-check
   `patches/0001-qwen4exp-hybrid-layer-banner.patch` still applies (and that
   the hparam field names it reads haven't moved) before every build.

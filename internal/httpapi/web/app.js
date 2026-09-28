@@ -1,22 +1,17 @@
 'use strict';
 
 const state = {
-  selectedModel: null, // absolute path on disk
-  port: 8080,
+  cfg: null,
+  model: null,   // { path, label }
+  plan: null,    // last /api/tune response
+  gpus: [],
+  chat: [],      // [{role, content}]
+  abort: null,
 };
 
-// ---- tabs -------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
 
-document.querySelectorAll('.tab-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-  });
-});
-
-// ---- helpers ------------------------------------------------------------
+// ---- helpers --------------------------------------------------------------
 
 async function api(method, path, body) {
   const resp = await fetch(path, {
@@ -25,18 +20,16 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await resp.json().catch(() => null);
-  if (!resp.ok) {
-    throw new Error((data && data.error) || resp.statusText);
-  }
+  if (!resp.ok) throw new Error((data && data.error) || resp.statusText);
   return data;
 }
 
 function fmtBytes(n) {
   if (!n) return '0 B';
-  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
   let i = 0;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-  return n.toFixed(1) + ' ' + units[i];
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(1) + ' ' + u[i];
 }
 
 function el(tag, cls, text) {
@@ -46,259 +39,440 @@ function el(tag, cls, text) {
   return e;
 }
 
-// ---- local models ---------------------------------------------------------
+function item(name, meta, ...right) {
+  const it = el('div', 'item');
+  const left = el('div');
+  left.appendChild(el('div', 'name', name));
+  if (meta) left.appendChild(el('div', 'meta', meta));
+  it.appendChild(left);
+  right.forEach((r) => it.appendChild(r));
+  return it;
+}
+
+function button(text, onClick, cls) {
+  const b = el('button', cls || '', text);
+  b.type = 'button';
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+// shell-ish split so edited args with quoted paths survive
+function splitArgs(s) {
+  const out = [];
+  const re = /"([^"]*)"|(\S+)/g;
+  let m;
+  while ((m = re.exec(s))) out.push(m[1] !== undefined ? m[1] : m[2]);
+  return out;
+}
+const joinArgs = (a) => a.map((x) => (/\s/.test(x) || x === '' ? `"${x}"` : x)).join(' ');
+
+// ---- tabs -----------------------------------------------------------------
+
+function showTab(name) {
+  document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === 'tab-' + name));
+}
+document.querySelectorAll('.tab-btn').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
+// ---- settings -------------------------------------------------------------
+
+const form = $('settings-form');
+const numberFields = new Set(['port', 'model.ctx_size', 'model.parallel', 'model.threads', 'model.batch_size',
+  'model.ubatch_size', 'model.temperature', 'model.top_p', 'model.top_k', 'model.min_p', 'model.repeat_penalty',
+  'model.presence_penalty', 'model.max_tokens', 'model.seed']);
+
+function getPath(obj, path) {
+  return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+}
+function setPath(obj, path, v) {
+  const keys = path.split('.');
+  const last = keys.pop();
+  const target = keys.reduce((o, k) => (o[k] = o[k] || {}), obj);
+  if (v === undefined) delete target[last]; else target[last] = v;
+}
+
+function fillForm(cfg) {
+  for (const f of form.elements) {
+    if (!f.name) continue;
+    const v = getPath(cfg, f.name);
+    if (f.type === 'checkbox') f.checked = !!v;
+    else if (f.name === 'extra_model_dirs') f.value = (v || []).join('\n');
+    else f.value = v == null ? '' : v;
+  }
+}
+
+function readForm() {
+  const cfg = JSON.parse(JSON.stringify(state.cfg || {}));
+  cfg.model = cfg.model || {};
+  for (const f of form.elements) {
+    if (!f.name) continue;
+    let v;
+    if (f.type === 'checkbox') v = f.checked;
+    else if (f.name === 'extra_model_dirs') v = f.value.split('\n').map((s) => s.trim()).filter(Boolean);
+    else if (numberFields.has(f.name)) v = f.value === '' ? undefined : Number(f.value);
+    else v = f.value.trim() === '' ? undefined : f.value.trim();
+    if (f.name === 'system_prompt' && v !== undefined) v = f.value; // keep formatting
+    setPath(cfg, f.name, v);
+  }
+  return cfg;
+}
+
+async function saveConfig(cfg) {
+  state.cfg = await api('POST', '/api/config', cfg);
+  renderSystemHint();
+  return state.cfg;
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await saveConfig(readForm());
+    $('settings-status').textContent = 'Saved. Model settings apply on the next Start.';
+    computeTune();
+  } catch (err) {
+    $('settings-status').textContent = 'Error: ' + err.message;
+  }
+});
+
+function renderSystemHint() {
+  const c = state.cfg || {};
+  $('chat-sys').textContent = c.system_prompt && c.system_prompt_mode !== 'off'
+    ? `System prompt (${c.system_prompt_mode}): ${c.system_prompt.slice(0, 120)}${c.system_prompt.length > 120 ? '…' : ''}`
+    : '';
+}
+
+// ---- GPUs -----------------------------------------------------------------
+
+async function loadGPUs() {
+  const box = $('gpu-list');
+  try {
+    state.gpus = await api('GET', '/api/gpus');
+  } catch (e) {
+    box.textContent = 'Error detecting GPUs: ' + e.message;
+    return;
+  }
+  box.textContent = '';
+  if (state.gpus.length === 0) {
+    box.appendChild(el('div', 'hint', 'No NVIDIA GPU detected (nvidia-smi not found) — models will run on CPU.'));
+    return;
+  }
+  const sel = (state.cfg && state.cfg.gpus) || [];
+  for (const g of state.gpus) {
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.checked = sel.length === 0 || sel.includes(g.Index);
+    cb.addEventListener('change', onGPUToggle);
+    cb.dataset.index = g.Index;
+    const lbl = el('label', 'inline name');
+    lbl.append(cb, `GPU ${g.Index}: ${g.Name}`);
+    const row = el('div', 'item');
+    row.append(lbl, el('div', 'meta', `${fmtBytes(g.FreeBytes)} free of ${fmtBytes(g.TotalBytes)}`));
+    box.appendChild(row);
+  }
+}
+
+async function onGPUToggle() {
+  const boxes = [...$('gpu-list').querySelectorAll('input[type=checkbox]')];
+  const chosen = boxes.filter((b) => b.checked).map((b) => Number(b.dataset.index));
+  const cfg = JSON.parse(JSON.stringify(state.cfg));
+  // all selected == "use every GPU", which also covers GPUs added later
+  cfg.gpus = chosen.length === boxes.length ? [] : chosen;
+  if (chosen.length === 0) cfg.gpus = [-1];
+  await saveConfig(cfg);
+  computeTune();
+}
+
+// ---- models ---------------------------------------------------------------
 
 async function loadLocalModels() {
-  const box = document.getElementById('local-models');
-  box.textContent = 'Loading…';
+  const box = $('local-models');
+  box.textContent = 'Scanning…';
   try {
     const groups = await api('GET', '/api/models/local');
     box.textContent = '';
-    if (!groups || groups.length === 0) {
-      box.appendChild(el('div', 'hint', 'No local GGUF models found yet.'));
-      return;
-    }
+    if (groups.length === 0) box.appendChild(el('div', 'hint', 'No GGUF models found yet — download one below.'));
     for (const g of groups) {
-      const item = el('div', 'item');
-      const left = el('div');
-      left.appendChild(el('div', 'name', g.Name));
-      left.appendChild(el('div', 'meta', `${g.Files.length} file(s), ${fmtBytes(g.TotalSize)}`));
-      item.appendChild(left);
-      const btn = el('button', '', 'Select');
-      btn.addEventListener('click', () => selectModel(g.Files[0].Path, g.Name));
-      item.appendChild(btn);
-      box.appendChild(item);
+      const shards = g.Files.length > 1 ? `${g.Files.length} shards, ` : '';
+      const file = g.Files[0].Path;
+      box.appendChild(item(g.Name, `${shards}${fmtBytes(g.TotalSize)} — ${file}`,
+        button('Use', () => selectModel(file, g.Name))));
+    }
+    if (!state.model && state.cfg && state.cfg.last_model_path) {
+      const last = groups.flatMap((g) => g.Files).find((f) => f.Path === state.cfg.last_model_path);
+      if (last) selectModel(last.Path, last.Repo || last.Path, true);
     }
   } catch (e) {
     box.textContent = 'Error: ' + e.message;
   }
 }
+$('refresh-local').addEventListener('click', loadLocalModels);
 
-document.getElementById('refresh-local').addEventListener('click', loadLocalModels);
+$('hf-search').addEventListener('click', async () => {
+  const q = $('hf-query').value.trim();
+  const box = $('hf-results');
+  box.textContent = 'Searching…';
+  try {
+    const res = await api('GET', '/api/hf/search?q=' + encodeURIComponent(q));
+    box.textContent = '';
+    if (res.length === 0) box.appendChild(el('div', 'hint', 'No results.'));
+    for (const r of res) {
+      box.appendChild(item(r.id, `♥ ${r.likes || 0}`, button('Files', () => {
+        $('hf-repo').value = r.id;
+        $('hf-list-files').click();
+      }, 'secondary')));
+    }
+  } catch (e) {
+    box.textContent = 'Error: ' + e.message;
+  }
+});
+$('hf-query').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('hf-search').click(); });
 
-// ---- hugging face download ------------------------------------------------
-
-document.getElementById('hf-list-files').addEventListener('click', async () => {
-  const repo = document.getElementById('hf-repo').value.trim();
-  const box = document.getElementById('hf-files');
+$('hf-list-files').addEventListener('click', async () => {
+  const repo = $('hf-repo').value.trim();
+  const box = $('hf-files');
   if (!repo) return;
   box.textContent = 'Loading…';
   try {
     const files = await api('GET', '/api/hf/files?repo=' + encodeURIComponent(repo));
     box.textContent = '';
-    if (!files || files.length === 0) {
-      box.appendChild(el('div', 'hint', 'No .gguf files found in this repo.'));
-      return;
-    }
+    if (files.length === 0) box.appendChild(el('div', 'hint', 'No .gguf files in this repo.'));
+    // group split shards so one click fetches the whole model
+    const groups = new Map();
     for (const f of files) {
-      const item = el('div', 'item');
-      const left = el('div');
-      left.appendChild(el('div', 'name', f.rfilename));
-      left.appendChild(el('div', 'meta', fmtBytes(f.size)));
-      item.appendChild(left);
-      const btn = el('button', '', 'Download');
-      btn.addEventListener('click', () => startDownload(repo, f.rfilename));
-      item.appendChild(btn);
-      box.appendChild(item);
+      const key = f.rfilename.replace(/-\d{5}-of-\d{5}\.gguf$/i, '');
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(f);
+    }
+    for (const [key, fs] of groups) {
+      const size = fs.reduce((a, f) => a + (f.size || 0), 0);
+      const label = fs.length > 1 ? `${key} (${fs.length} shards)` : fs[0].rfilename;
+      box.appendChild(item(label, size ? fmtBytes(size) : '', button('Download', async () => {
+        for (const f of fs) {
+          try { await api('POST', '/api/hf/download', { repo, filename: f.rfilename }); }
+          catch (e) { alert('Download failed to start: ' + e.message); return; }
+        }
+        refreshDownloads();
+      })));
     }
   } catch (e) {
     box.textContent = 'Error: ' + e.message;
   }
 });
 
-async function startDownload(repo, filename) {
-  try {
-    await api('POST', '/api/hf/download', { repo, filename });
-    refreshDownloads();
-  } catch (e) {
-    alert('Download failed to start: ' + e.message);
-  }
-}
-
+let hadActiveDownloads = false;
 async function refreshDownloads() {
-  const box = document.getElementById('downloads');
+  const box = $('downloads');
   try {
     const list = await api('GET', '/api/hf/downloads');
     box.textContent = '';
-    if (!list || list.length === 0) {
-      box.appendChild(el('div', 'hint', 'No downloads yet.'));
-      return;
-    }
-    for (const d of list.sort((a, b) => (a.started_at < b.started_at ? 1 : -1))) {
-      const item = el('div', 'item');
-      const left = el('div');
-      left.appendChild(el('div', 'name', `${d.repo}/${d.filename}`));
-      const pct = d.total_bytes ? Math.round((d.done_bytes / d.total_bytes) * 100) : 0;
-      left.appendChild(el('div', 'meta', `${d.state} — ${fmtBytes(d.done_bytes)}${d.total_bytes ? ' / ' + fmtBytes(d.total_bytes) : ''}${d.error ? ' — ' + d.error : ''}`));
-      item.appendChild(left);
+    if (list.length === 0) box.appendChild(el('div', 'hint', 'No downloads yet.'));
+    list.sort((a, b) => (a.started_at < b.started_at ? 1 : -1));
+    for (const d of list) {
+      const pct = d.total_bytes ? (d.done_bytes / d.total_bytes) * 100 : (d.state === 'done' ? 100 : 0);
       const bar = el('div', 'progress');
       const fill = el('div');
-      fill.style.width = pct + '%';
+      fill.style.width = pct.toFixed(1) + '%';
       bar.appendChild(fill);
-      item.appendChild(bar);
-      box.appendChild(item);
+      const size = `${fmtBytes(d.done_bytes)}${d.total_bytes ? ' / ' + fmtBytes(d.total_bytes) : ''}`;
+      box.appendChild(item(`${d.repo}/${d.filename}`, `${d.state} — ${size}${d.error ? ' — ' + d.error : ''}`, bar));
     }
-  } catch (e) {
-    box.textContent = 'Error: ' + e.message;
-  }
+    const active = list.some((d) => d.state === 'active' || d.state === 'pending');
+    if (hadActiveDownloads && !active) loadLocalModels();
+    hadActiveDownloads = active;
+  } catch (_) { /* transient */ }
 }
-
 setInterval(refreshDownloads, 1500);
 
-// ---- run tab: selection + tuning -------------------------------------------
+// ---- run ------------------------------------------------------------------
 
-function selectModel(path, label) {
-  state.selectedModel = path;
-  document.getElementById('selected-model').textContent = (label || path) + '\n' + path;
-  document.querySelectorAll('.tab-btn')[1].click();
+function selectModel(path, label, quiet) {
+  state.model = { path, label };
+  $('selected-model').textContent = `${label}\n${path}`;
+  if (!quiet) showTab('run');
   computeTune();
 }
 
-async function loadGPUs() {
-  const box = document.getElementById('gpu-info');
-  try {
-    const gpus = await api('GET', '/api/gpus');
-    if (!gpus || gpus.length === 0) {
-      box.textContent = 'No NVIDIA GPU detected (nvidia-smi not found, or no CUDA device) — CPU-only.';
-      return;
-    }
-    box.textContent = gpus.map(g => `${g.Name}: ${fmtBytes(g.FreeBytes)} free`).join('; ');
-  } catch (e) {
-    box.textContent = 'Error detecting GPU: ' + e.message;
-  }
-}
-
 async function computeTune() {
-  const out = document.getElementById('tune-plan');
-  const argsBox = document.getElementById('tune-args');
-  if (!state.selectedModel) {
-    out.textContent = 'Select a model to compute an offload plan.';
-    return;
-  }
-  out.textContent = 'Computing…';
-  argsBox.textContent = '';
+  const out = $('tune-plan');
+  if (!state.model) return;
+  out.textContent = 'Reading model and computing plan…';
   try {
-    const ctxOverride = document.getElementById('ctx-override').value;
-    const body = { model_path: state.selectedModel };
-    if (ctxOverride) body.requested_ctx = parseInt(ctxOverride, 10);
-
-    const resp = await api('POST', '/api/tune', body);
+    const resp = await api('POST', '/api/tune', { model_path: state.model.path });
+    state.plan = resp;
     const p = resp.plan;
-    const lines = [
-      `n_gpu_layers = ${p.NGpuLayers}`,
-      p.NCPUMoE ? `n_cpu_moe = ${p.NCPUMoE} (experts of the first ${p.NCPUMoE} layers stay on CPU RAM)` : null,
-      `ctx_size = ${p.CtxSize}`,
-      `fits on GPU: ${fmtBytes(p.GPUFitBytes)} / total ${fmtBytes(p.TotalBytes)}`,
-      ...(p.Notes || []).map(n => '• ' + n),
-    ].filter(Boolean);
+    const lines = [];
+    if (p.Devices && p.Devices.length) {
+      p.Devices.forEach((d, i) => {
+        const layers = p.TensorSplit ? ` — ${p.TensorSplit[i]} slot(s)` : '';
+        lines.push(`GPU ${d} ${p.DeviceNames[i]}: ${fmtBytes(p.DeviceBytes[i])}${layers}`);
+      });
+    }
+    lines.push(`GPU layers: ${p.NGpuLayers}` + (p.NCPUMoE ? `, experts of the first ${p.NCPUMoE} blocks in CPU RAM` : ''));
+    lines.push(`context: ${p.CtxSize} tokens, KV cache ${p.CacheTypeKV}, ${p.Parallel} slot(s)`);
+    lines.push(`on GPU ${fmtBytes(p.GPUFitBytes)} · in RAM ${fmtBytes(p.CPUFitBytes)} · total ${fmtBytes(p.TotalBytes)}`);
+    (p.Notes || []).forEach((n) => lines.push('• ' + n));
     out.textContent = lines.join('\n');
-    argsBox.textContent = resp.args.join(' ');
-    state.lastArgs = resp.args;
+    $('tune-args').value = joinArgs(resp.args);
   } catch (e) {
     out.textContent = 'Error: ' + e.message;
   }
 }
+$('retune').addEventListener('click', computeTune);
 
-document.getElementById('retune').addEventListener('click', computeTune);
-
-// ---- server lifecycle -------------------------------------------------------
-
-async function refreshServerStatus() {
+$('start-server').addEventListener('click', async () => {
+  if (!state.model) { alert('Pick a model in the Models tab first.'); return; }
+  const args = splitArgs($('tune-args').value);
   try {
-    const st = await api('GET', '/api/server/status');
-    const label = document.getElementById('server-status');
-    const links = document.getElementById('server-links');
-    if (st.Running) {
-      label.textContent = `running (pid ${st.PID})`;
-      links.style.display = '';
-      document.getElementById('link-webui').href = `http://127.0.0.1:${state.port}/`;
-      document.getElementById('link-api').href = `http://127.0.0.1:${state.port}/v1/models`;
-    } else {
-      label.textContent = st.ExitErr ? 'stopped (' + st.ExitErr + ')' : 'stopped';
-      links.style.display = 'none';
-    }
-  } catch (e) {
-    // ignore transient errors while polling
-  }
-}
-
-document.getElementById('start-server').addEventListener('click', async () => {
-  if (!state.lastArgs) {
-    alert('Compute a launch plan first (select a model in the Models tab).');
-    return;
-  }
-  try {
-    await api('POST', '/api/server/start', { args: state.lastArgs });
+    await api('POST', '/api/server/start', {
+      model_path: state.model.path,
+      args,
+      devices: state.plan ? state.plan.plan.Devices : [],
+    });
+    $('server-log').textContent = '';
     refreshServerStatus();
   } catch (e) {
     alert('Failed to start: ' + e.message);
   }
 });
 
-document.getElementById('stop-server').addEventListener('click', async () => {
-  try {
-    await api('POST', '/api/server/stop');
-    refreshServerStatus();
-  } catch (e) {
-    alert('Failed to stop: ' + e.message);
-  }
+$('stop-server').addEventListener('click', async () => {
+  try { await api('POST', '/api/server/stop'); } catch (e) { alert('Failed to stop: ' + e.message); }
+  refreshServerStatus();
 });
 
-setInterval(refreshServerStatus, 2000);
+$('open-webui').addEventListener('click', () => api('POST', '/api/open').catch(() => {}));
+
+$('quit').addEventListener('click', async () => {
+  if (!confirm('Stop the model and exit Q38FNInference?')) return;
+  try { await api('POST', '/api/quit'); } catch (_) {}
+  document.body.innerHTML = '<main><div class="panel"><h2>Q38FNInference has exited.</h2><p class="hint">You can close this tab.</p></div></main>';
+});
+
+async function refreshServerStatus() {
+  try {
+    const st = await api('GET', '/api/server/status');
+    const pill = $('hdr-status');
+    let label = 'stopped';
+    if (st.Running) label = st.Ready ? 'ready' : 'loading';
+    pill.textContent = label;
+    pill.className = 'pill ' + (st.Running ? label : '');
+    $('server-status').textContent = st.Running ? `${label} (pid ${st.PID})` : (st.ExitErr ? 'exited: ' + st.ExitErr : '');
+    $('start-server').disabled = st.Running;
+    $('stop-server').disabled = !st.Running;
+    $('open-webui').disabled = !st.Ready;
+    $('chat-send').disabled = !st.Ready;
+  } catch (_) { /* transient */ }
+}
+setInterval(refreshServerStatus, 1500);
 
 function streamLogs() {
-  const box = document.getElementById('server-log');
+  const box = $('server-log');
   const es = new EventSource('/api/server/logs/stream');
   es.onmessage = (ev) => {
-    try {
-      const line = JSON.parse(ev.data);
-      box.textContent += line + '\n';
-      box.scrollTop = box.scrollHeight;
-    } catch (_) {}
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    box.textContent += JSON.parse(ev.data) + '\n';
+    if (box.textContent.length > 400000) box.textContent = box.textContent.slice(-300000);
+    if (atBottom) box.scrollTop = box.scrollHeight;
   };
-  es.onerror = () => {
-    es.close();
-    setTimeout(streamLogs, 2000);
-  };
+  es.onerror = () => { es.close(); setTimeout(streamLogs, 2000); };
 }
 
-// ---- settings ---------------------------------------------------------------
+// ---- chat -----------------------------------------------------------------
 
-async function loadSettings() {
+function renderChat() {
+  const log = $('chat-log');
+  log.textContent = '';
+  for (const m of state.chat) {
+    const div = el('div', 'msg ' + m.role);
+    if (m.reasoning) div.appendChild(el('div', 'think', m.reasoning));
+    div.appendChild(document.createTextNode(m.content || (m.role === 'assistant' && !m.done ? '…' : '')));
+    log.appendChild(div);
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendChat() {
+  const text = $('chat-input').value.trim();
+  if (!text || state.abort) return;
+  $('chat-input').value = '';
+  state.chat.push({ role: 'user', content: text });
+  const reply = { role: 'assistant', content: '', reasoning: '' };
+  state.chat.push(reply);
+  renderChat();
+
+  const stream = $('chat-stream').checked;
+  const messages = state.chat.filter((m) => m !== reply && m.role !== 'error').map((m) => ({ role: m.role, content: m.content }));
+  state.abort = new AbortController();
   try {
-    const cfg = await api('GET', '/api/config');
-    document.getElementById('cfg-bin').value = cfg.llama_server_path || '';
-    document.getElementById('cfg-port').value = cfg.port || 8080;
-    document.getElementById('cfg-token').value = cfg.hf_token || '';
-    document.getElementById('cfg-dirs').value = (cfg.extra_model_dirs || []).join('\n');
-    state.port = cfg.port || 8080;
+    const resp = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages, stream }),
+      signal: state.abort.signal,
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error((err.error && (err.error.message || err.error)) || resp.statusText);
+    }
+    if (!stream) {
+      const data = await resp.json();
+      const msg = data.choices[0].message;
+      reply.content = msg.content || '';
+      reply.reasoning = msg.reasoning_content || '';
+    } else {
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, i).trim();
+          buf = buf.slice(i + 1);
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (payload === '[DONE]') continue;
+          const delta = (JSON.parse(payload).choices[0] || {}).delta || {};
+          if (delta.content) reply.content += delta.content;
+          if (delta.reasoning_content) reply.reasoning += delta.reasoning_content;
+          renderChat();
+        }
+      }
+    }
   } catch (e) {
-    document.getElementById('settings-status').textContent = 'Error: ' + e.message;
+    if (e.name !== 'AbortError') state.chat.push({ role: 'error', content: 'Error: ' + e.message });
+  } finally {
+    reply.done = true;
+    state.abort = null;
+    renderChat();
   }
 }
 
-document.getElementById('save-settings').addEventListener('click', async () => {
-  const cfg = {
-    llama_server_path: document.getElementById('cfg-bin').value.trim(),
-    port: parseInt(document.getElementById('cfg-port').value, 10) || 8080,
-    hf_token: document.getElementById('cfg-token').value.trim(),
-    extra_model_dirs: document.getElementById('cfg-dirs').value.split('\n').map(s => s.trim()).filter(Boolean),
-  };
-  try {
-    await api('POST', '/api/config', cfg);
-    state.port = cfg.port;
-    document.getElementById('settings-status').textContent = 'Saved.';
-  } catch (e) {
-    document.getElementById('settings-status').textContent = 'Error: ' + e.message;
-  }
+$('chat-send').addEventListener('click', sendChat);
+$('chat-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
 });
+$('chat-stop').addEventListener('click', () => state.abort && state.abort.abort());
+$('chat-clear').addEventListener('click', () => { state.chat = []; renderChat(); });
 
-// ---- init ---------------------------------------------------------------
+// ---- init -----------------------------------------------------------------
 
-loadSettings().then(() => {
-  loadLocalModels();
+(async function init() {
+  try {
+    state.cfg = await api('GET', '/api/config');
+    fillForm(state.cfg);
+    renderSystemHint();
+    const info = await api('GET', '/api/info');
+    $('api-url').textContent = info.api_url + '/v1';
+    $('api-error').textContent = info.api_error || '';
+  } catch (e) {
+    $('settings-status').textContent = 'Error loading settings: ' + e.message;
+  }
   loadGPUs();
+  loadLocalModels();
   refreshDownloads();
   refreshServerStatus();
   streamLogs();
-});
+})();

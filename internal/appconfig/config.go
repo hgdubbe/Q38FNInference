@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 )
 
 // Config holds everything the launcher remembers across restarts.
@@ -20,15 +22,98 @@ type Config struct {
 	ExtraModelDirs []string `json:"extra_model_dirs,omitempty"`
 	// HFToken is an optional Hugging Face access token, for gated repos.
 	HFToken string `json:"hf_token,omitempty"`
-	// Port is the port llama-server listens on.
+	// Port is where the OpenAI-compatible API and llama-server's web UI are
+	// served (through the system-prompt proxy). Takes effect on restart.
 	Port int `json:"port,omitempty"`
+	// APIHost is the API bind address; "0.0.0.0" exposes it on the LAN.
+	APIHost string `json:"api_host,omitempty"`
 	// LastModelPath remembers the last model launched, for convenience.
 	LastModelPath string `json:"last_model_path,omitempty"`
+
+	// GPUs lists the nvidia-smi indices to use; empty means all of them.
+	GPUs []int `json:"gpus,omitempty"`
+
+	// SystemPrompt is injected by the API proxy according to SystemPromptMode
+	// ("off", "default": only when a request has none, "override": always).
+	SystemPrompt     string `json:"system_prompt,omitempty"`
+	SystemPromptMode string `json:"system_prompt_mode,omitempty"`
+
+	// OpenChatOnReady opens the chat web UI once a started model is loaded.
+	OpenChatOnReady bool `json:"open_chat_on_ready"`
+
+	Model ModelSettings `json:"model"`
+}
+
+// ModelSettings are llama-server load/sampling options. Zero values and nil
+// pointers mean "leave llama-server's own default".
+type ModelSettings struct {
+	CtxSize    uint64 `json:"ctx_size,omitempty"`
+	Parallel   int    `json:"parallel,omitempty"`
+	CacheType  string `json:"cache_type,omitempty"`
+	Threads    int    `json:"threads,omitempty"`
+	BatchSize  int    `json:"batch_size,omitempty"`
+	UBatchSize int    `json:"ubatch_size,omitempty"`
+
+	Temperature     *float64 `json:"temperature,omitempty"`
+	TopP            *float64 `json:"top_p,omitempty"`
+	TopK            *int     `json:"top_k,omitempty"`
+	MinP            *float64 `json:"min_p,omitempty"`
+	RepeatPenalty   *float64 `json:"repeat_penalty,omitempty"`
+	PresencePenalty *float64 `json:"presence_penalty,omitempty"`
+	MaxTokens       *int     `json:"max_tokens,omitempty"`
+	Seed            *int64   `json:"seed,omitempty"`
+
+	Reasoning string `json:"reasoning,omitempty"` // "", "on", "off", "auto"
+	APIKey    string `json:"api_key,omitempty"`
+	Alias     string `json:"alias,omitempty"`
+	ExtraArgs string `json:"extra_args,omitempty"` // whitespace-separated, appended last
+}
+
+// Args renders the non-offload llama-server flags for these settings.
+func (s ModelSettings) Args() []string {
+	var a []string
+	addI := func(flag string, v int) {
+		if v > 0 {
+			a = append(a, flag, strconv.Itoa(v))
+		}
+	}
+	addF := func(flag string, v *float64) {
+		if v != nil {
+			a = append(a, flag, strconv.FormatFloat(*v, 'f', -1, 64))
+		}
+	}
+	addI("--threads", s.Threads)
+	addI("--batch-size", s.BatchSize)
+	addI("--ubatch-size", s.UBatchSize)
+	addF("--temp", s.Temperature)
+	addF("--top-p", s.TopP)
+	if s.TopK != nil {
+		a = append(a, "--top-k", strconv.Itoa(*s.TopK))
+	}
+	addF("--min-p", s.MinP)
+	addF("--repeat-penalty", s.RepeatPenalty)
+	addF("--presence-penalty", s.PresencePenalty)
+	if s.MaxTokens != nil {
+		a = append(a, "--n-predict", strconv.Itoa(*s.MaxTokens))
+	}
+	if s.Seed != nil {
+		a = append(a, "--seed", strconv.FormatInt(*s.Seed, 10))
+	}
+	if s.Reasoning != "" {
+		a = append(a, "--reasoning", s.Reasoning)
+	}
+	if s.APIKey != "" {
+		a = append(a, "--api-key", s.APIKey)
+	}
+	if s.Alias != "" {
+		a = append(a, "--alias", s.Alias)
+	}
+	return append(a, strings.Fields(s.ExtraArgs)...)
 }
 
 // Default returns a Config with sane defaults filled in.
 func Default() Config {
-	return Config{Port: 8080}
+	return Config{Port: 8080, APIHost: "127.0.0.1", SystemPromptMode: "default", OpenChatOnReady: true}
 }
 
 // Dir returns the directory config/state lives in, creating it if needed.
@@ -82,7 +167,7 @@ func (c Config) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, b, 0o644)
+	return os.WriteFile(p, b, 0o600) // holds the HF token / API key
 }
 
 // ModelsDir is where downloaded models are stored by default.

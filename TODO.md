@@ -15,8 +15,8 @@ of these easy to pick up as a small side-patch, do it. They are listed in no spe
   to it instead of the hand-rolled heuristic in `internal/tuning`.
 - Add a packaged Windows installer (MSIX or Inno Setup) instead of a raw zip,
   once the basic flow has been used for a while.
-- `internal/tuning` only plans for a single GPU; add multi-GPU tensor-split
-  support if/when that's actually needed.
+- Calibrate the planner's compute-buffer constants (`internal/tuning`)
+  against real llama-server memory logs on real hardware.
 - Consider a small native system-tray icon (e.g. via getlantern/systray) so
   the launcher feels less like "a server that happens to open a browser tab"
   — deliberately skipped for the first pass to avoid an untested cgo/Win32

@@ -1,93 +1,84 @@
 # Q38FNInference
 
-A Windows launcher for running **Qwen3.8-Flash-Next** (`Qwen/Qwen3.8-Flash-Next`,
-architecture id `qwen4exp` in llama.cpp) locally via a CUDA-accelerated
-`llama-server`, with GGUF support, model discovery/download from Hugging
-Face, and a small local web control panel.
+A Windows app for running **Qwen3.8-Flash-Next** (`Qwen/Qwen3.8-Flash-Next`,
+llama.cpp architecture `qwen4exp`) locally on NVIDIA GPUs, built on a CUDA
+build of `ggml-org/llama.cpp`'s `llama-server`.
 
-It is a launcher, not a reimplementation of an inference server: model
-loading, the OpenAI-compatible API (streaming and non-streaming), and the
-testing web UI are all `llama-server`'s own, built with CUDA from
-`ggml-org/llama.cpp`. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for
-why, and for what upstream already supports for this specific architecture.
+- Opens a local web control panel automatically when started.
+- Finds GGUF models you already have (Hugging Face cache, its own models
+  folder, extra folders) and downloads new ones from Hugging Face, with
+  resume and split-shard handling.
+- Computes a GPU/CPU offload plan from the model's real tensor sizes, across
+  one or several GPUs (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+- Common model settings: context, KV cache type, sampling (temperature,
+  top-p/k, min-p, penalties, seed, max tokens), reasoning, threads, batch
+  sizes, API key, extra llama-server arguments.
+- System prompt override, applied to every chat request (default-only or
+  force-replace).
+- Chat tab for quick testing, llama.cpp's own web UI, and an OpenAI-compatible
+  API at `http://127.0.0.1:8080/v1` (streaming and non-streaming; the
+  Anthropic-style `/v1/messages` works too).
 
-## What's here
+## Download
 
-| Path | What |
-|---|---|
-| `cmd/q38fninference` | Launcher entrypoint (Go): starts the control panel, opens a browser |
-| `internal/gguf` | Dependency-free GGUF header/metadata/tensor-size reader |
-| `internal/tuning` | qwen4exp-aware GPU/CPU offload planner (`--n-cpu-moe`, `-ngl`, context, etc.) |
-| `internal/gpu` | NVIDIA VRAM detection (`nvidia-smi`) |
-| `internal/hf` | Hugging Face Hub client: list files, resumable download with progress |
-| `internal/models` | Discovers already-downloaded GGUF files (HF cache + configured dirs) |
-| `internal/server` | Manages the `llama-server` child process (start/stop/log tail) |
-| `internal/httpapi` | The launcher's own local JSON API + embedded web control panel |
-| `internal/appconfig` | Persisted settings |
-| `internal/downloadmgr` | Tracks in-flight Hugging Face downloads |
-| `patches/` | The one (additive, log-only) patch this project applies to llama.cpp |
-| `.github/workflows/build-windows-cuda.yml` | CI: builds llama.cpp+CUDA and this launcher, packages a release zip |
-| `scripts/build-windows-cuda.ps1` | Same build, runnable locally on Windows |
+Get `Q38FNInference-windows-x64-cuda12.zip` from the
+[Releases](https://github.com/hgdubbe/Q38FNInference/releases) page, extract
+it, and run `q38fninference.exe`. It needs an NVIDIA driver that supports
+CUDA 12.4 (R550 or newer). Running the exe again while it's open just
+reopens the control panel; **Quit** (top right) stops the model and exits.
+
+Settings and `launcher.log` live in `%APPDATA%\Q38FNInference`; downloaded
+models go to `%APPDATA%\Q38FNInference\models`.
+
+## Using it
+
+1. **Models**: pick a local GGUF, or search Hugging Face / list a repo's GGUF
+   files and download one (split models download all shards).
+2. **Run**: tick the GPUs to use, check the launch plan (per-GPU memory,
+   layers, which MoE experts stay in CPU RAM), optionally edit the
+   llama-server arguments, then **Start**. The status pill turns green when
+   the model is loaded.
+3. **Chat**, **Open llama.cpp web UI**, or point any OpenAI client at
+   `http://127.0.0.1:8080/v1`.
+4. **Settings**: system prompt, model/sampling options, API port and bind
+   address (127.0.0.1 or LAN), llama-server path, Hugging Face token.
 
 ## Building
 
-### The launcher itself
-
-Requires Go 1.24+.
+The launcher is Go 1.24+ with no cgo, so it cross-compiles from any OS:
 
 ```sh
-go build -o q38fninference.exe ./cmd/q38fninference   # cross-compiles fine from any OS: GOOS=windows GOARCH=amd64
 go test ./...
+GOOS=windows GOARCH=amd64 go build -ldflags "-H windowsgui" -o q38fninference.exe ./cmd/q38fninference
 ```
 
-### llama.cpp with CUDA (Windows)
+llama.cpp with CUDA:
 
-Either let CI do it (`.github/workflows/build-windows-cuda.yml`, manually
-triggered or weekly), or run locally from a "Developer PowerShell for VS
-2022" prompt with CMake, Ninja, and the CUDA Toolkit (12.4+) installed:
+- CI: `.github/workflows/build-windows-cuda.yml` builds llama.cpp (pinned
+  commit, with `patches/` applied) and the launcher, and publishes a release
+  when a `v*` tag is pushed. It can also be run manually from the Actions tab.
+- Locally on Windows: `.\scripts\build-windows-cuda.ps1` (Visual Studio with
+  C++ and Clang tools, CMake, Ninja, CUDA Toolkit 12.4+, Go) produces the same
+  folder in `dist\Q38FNInference`.
 
-```powershell
-.\scripts\build-windows-cuda.ps1
-```
+## Layout
 
-This clones `ggml-org/llama.cpp`, applies `patches/0001-qwen4exp-hybrid-layer-banner.patch`,
-builds `llama-server.exe` (CPU/dynamic-backend base) and `ggml-cuda.dll`
-separately — mirroring upstream's own release process, where CUDA ships as a
-dynamically-loaded backend DLL rather than being statically linked — copies
-the CUDA runtime DLLs, and builds the launcher, all into `.\dist`.
+| Path | What |
+|---|---|
+| `cmd/q38fninference` | Entry point: control panel, API port, browser, single instance |
+| `internal/tuning` | Offload planner (single and multi-GPU) |
+| `internal/gguf` | GGUF metadata and tensor-size reader |
+| `internal/proxy` | API reverse proxy that applies the system prompt |
+| `internal/httpapi` | Control panel API and embedded web UI |
+| `internal/server` | llama-server child process |
+| `internal/hf`, `internal/downloadmgr` | Hugging Face listing and resumable downloads |
+| `internal/models` | Local GGUF discovery |
+| `internal/gpu` | NVIDIA GPU detection (`nvidia-smi`) |
+| `internal/appconfig` | Persisted settings |
+| `patches/` | The patch applied to llama.cpp |
 
-Both the CI workflow and the script land everything (`q38fninference.exe`,
-`llama-server.exe`, `ggml-cuda.dll`, `ggml*.dll`, `cudart64_*.dll`, ...) in
-one directory: the launcher looks for `llama-server.exe` next to itself (or
-in a `llama\` subfolder, or on `PATH`, or wherever you point it in Settings).
+## Status
 
-## Running
-
-1. Run `q38fninference.exe`. It opens a browser to a local control panel
-   (`http://127.0.0.1:8787` by default).
-2. **Models tab**: either pick an already-downloaded model (auto-discovered
-   from your Hugging Face cache and this app's own models folder), or search/
-   download GGUF files straight from a Hugging Face repo (e.g.
-   `Qwen/Qwen3.8-Flash-Next`), with resumable progress.
-3. **Run tab**: select a model to get a computed offload plan (see
-   `internal/tuning`) — how many MoE-expert layers stay on CPU RAM vs. GPU,
-   context size, flash-attention, KV cache quantization — tweak it if you
-   want, then **Start server**.
-4. Once running, the panel links straight to `llama-server`'s own web UI
-   (for interactive testing) and its OpenAI-compatible API
-   (`http://127.0.0.1:<port>/v1/...`, streaming and non-streaming, same as
-   any other OpenAI-compatible client).
-
-GGUF split files (`model-00001-of-0000N.gguf`, ...) are handled
-transparently: point at any shard and the rest are found automatically, both
-for local discovery and for llama-server's own loader.
-
-## Status / limitations
-
-Built and unit-tested (`go test -race ./...` passes) without access to real
-Qwen3.8-Flash-Next weights or a CUDA GPU — huggingface.co was unreachable and
-no GPU was available in the environment this was built in. The llama.cpp
-build itself is upstream's own CI-tested process; this project's own code
-(GGUF parsing, tuning math, HTTP/download plumbing, process management) is
-unit-tested but has not been run end-to-end against the real model. See
-`docs/ARCHITECTURE.md` and `TODO.md` for specifics and follow-ups.
+Unit tests and an end-to-end run against a stand-in llama-server pass, but
+this has not yet been run against real Qwen3.8-Flash-Next weights on real
+CUDA hardware. See `docs/ARCHITECTURE.md` and `TODO.md`.

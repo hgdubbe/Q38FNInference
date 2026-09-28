@@ -36,6 +36,28 @@ func (m *Metadata) getUint(suffix string) (uint64, bool) {
 	}
 }
 
+// Uint reads an arch-prefixed integer key, e.g. Uint("ssm.state_size").
+func (m *Metadata) Uint(suffix string) (uint64, bool) { return m.getUint(suffix) }
+
+// HeadCountKV returns the KV head count for layer il; the key may be a
+// scalar or a per-layer array (0 for recurrent layers in hybrid models).
+func (m *Metadata) HeadCountKV(il int) uint64 {
+	v, ok := m.KV[m.key("attention.head_count_kv")]
+	if !ok {
+		v, ok = m.KV[m.key("attention.head_count")]
+		if !ok {
+			return 0
+		}
+	}
+	if arr, ok := v.([]any); ok {
+		if il < len(arr) {
+			return asUint(arr[il])
+		}
+		return 0
+	}
+	return asUint(v)
+}
+
 // NLayer is the total transformer block count (arch.block_count).
 func (m *Metadata) NLayer() (uint64, bool) { return m.getUint("block_count") }
 

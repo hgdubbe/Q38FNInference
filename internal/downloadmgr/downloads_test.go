@@ -77,3 +77,23 @@ func TestListReturnsAllDownloads(t *testing.T) {
 		t.Fatalf("List() len = %d, want 2", got)
 	}
 }
+
+func TestStartDedupesActiveDownload(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+		w.Write([]byte("x"))
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	client := hf.NewClient("")
+	client.BaseURL = srv.URL
+	m := NewManager(client)
+	dest := filepath.Join(t.TempDir(), "m.gguf")
+	a := m.Start(context.Background(), "r", "m.gguf", dest)
+	b := m.Start(context.Background(), "r", "m.gguf", dest)
+	if a.ID != b.ID {
+		t.Errorf("second Start got %s, want existing %s", b.ID, a.ID)
+	}
+}

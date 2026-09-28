@@ -1,209 +1,221 @@
-name: Build Windows CUDA release
+name: Release (Windows, CUDA)
 
-# Builds llama.cpp (with CUDA) + this launcher for Windows/x64 and packages
-# them together. Mirrors ggml-org/llama.cpp's own release.yml windows-cpu +
-# windows-cuda split (llama-server.exe is CPU/DL-backend-built once, CUDA is
-# a separate dynamically-loaded backend DLL merged in afterwards) since
-# that's the combination upstream actually tests in CI. See
-# docs/ARCHITECTURE.md for why we patch llama.cpp the way we do here.
+# Builds llama.cpp with CUDA plus the launcher for Windows x64 and, on a
+# v* tag, publishes them as a GitHub release. The llama.cpp jobs copy
+# ggml-org/llama.cpp's own release.yml (windows-cpu + windows-cuda) at the
+# pinned commit: llama-server.exe and the CPU backends are built once with
+# clang, and CUDA ships as a dynamically loaded ggml-cuda.dll built with
+# MSVC/nvcc, then both are merged into one folder.
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       llama_cpp_ref:
-        description: "llama.cpp git ref to build (branch, tag, or commit)"
+        description: "llama.cpp commit/tag to build (the patch is verified against the default)"
         required: false
-        default: "master"
-  schedule:
-    # weekly, so the pinned upstream ref doesn't drift out of sight for long
-    - cron: "0 6 * * 1"
+        default: ""
 
 env:
-  LLAMA_CPP_REPO: ggml-org/llama.cpp
-  CUDA_VERSION: "12.4"
+  # patches/*.patch are verified against this commit; bump both together
+  LLAMA_CPP_REF: ${{ github.event.inputs.llama_cpp_ref || '6c7a87f7e5e5cd75b8a641c3471f2dee84a6ed17' }}
+  CMAKE_ARGS: "-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON"
+
+permissions:
+  contents: read
 
 jobs:
-  windows-cpu:
-    name: llama.cpp (windows-cpu base + our patch)
-    runs-on: windows-2022
+  llama-cpu:
+    name: llama.cpp base (llama-server + CPU backends)
+    runs-on: windows-2025-vs2026
     steps:
-      - name: Checkout launcher repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: launcher
-
-      - name: Checkout llama.cpp
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
-          repository: ${{ env.LLAMA_CPP_REPO }}
-          ref: ${{ github.event.inputs.llama_cpp_ref || 'master' }}
+          repository: ggml-org/llama.cpp
+          ref: ${{ env.LLAMA_CPP_REF }}
           path: llama.cpp
-          fetch-depth: 0
+          fetch-depth: 0 # build-info needs the commit count
 
-      - name: Apply Q38FNInference patches
+      - name: Apply patches
         shell: bash
-        run: |
-          set -eu
-          cd llama.cpp
-          for p in ../launcher/patches/*.patch; do
-            echo "Applying $p"
-            git apply --verbose "$p"
-          done
+        working-directory: llama.cpp
+        run: for p in ../launcher/patches/*.patch; do git apply --verbose "$p"; done
 
       - name: Install Ninja
         run: choco install ninja -y
 
-      - name: ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          key: windows-cpu-cuda-release
-
-      - name: Configure + build (CPU/DL base, includes llama-server.exe)
-        working-directory: llama.cpp
+      - name: Build
         shell: cmd
+        working-directory: llama.cpp
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
-          cmake -S . -B build -G Ninja ^
-            -DCMAKE_BUILD_TYPE=Release ^
+          call "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -D CMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
             -DGGML_NATIVE=OFF ^
             -DGGML_BACKEND_DL=ON ^
             -DGGML_CPU_ALL_VARIANTS=ON ^
             -DGGML_OPENMP=ON ^
-            -DLLAMA_CURL=OFF
+            -DGGML_OPENMP_FETCH=ON ^
+            ${{ env.CMAKE_ARGS }}
           cmake --build build --config Release
+          copy LICENSE build\bin\Release\LICENSE-llama.cpp.txt
 
-      - name: Upload windows-cpu base
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
-          name: llama-windows-cpu-base
-          path: llama.cpp/build/bin/*
+          name: llama-cpu
+          path: llama.cpp/build/bin/Release/*
           if-no-files-found: error
 
-  windows-cuda:
-    name: llama.cpp (ggml-cuda.dll)
+  llama-cuda:
+    name: llama.cpp CUDA backend (ggml-cuda.dll)
     runs-on: windows-2022
     steps:
-      - name: Checkout launcher repo (for patches only)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: launcher
-
-      - name: Checkout llama.cpp
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
-          repository: ${{ env.LLAMA_CPP_REPO }}
-          ref: ${{ github.event.inputs.llama_cpp_ref || 'master' }}
+          repository: ggml-org/llama.cpp
+          ref: ${{ env.LLAMA_CPP_REF }}
           path: llama.cpp
-          fetch-depth: 0
 
-      - name: Apply Q38FNInference patches
+      - name: Apply patches
         shell: bash
-        run: |
-          set -eu
-          cd llama.cpp
-          for p in ../launcher/patches/*.patch; do
-            echo "Applying $p"
-            git apply --verbose "$p"
-          done
+        working-directory: llama.cpp
+        run: for p in ../launcher/patches/*.patch; do git apply --verbose "$p"; done
 
       - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.19
-        id: cuda-toolkit
+        uses: ./llama.cpp/.github/actions/windows-setup-cuda
         with:
-          cuda: "12.4.1"
-          method: network
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+          cuda_version: "12.4"
+          cuda_arch: x64
 
       - name: Install Ninja
         run: choco install ninja -y
 
-      - name: ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          key: windows-cuda-release
-
-      - name: Configure + build (ggml-cuda backend only)
-        working-directory: llama.cpp
+      - name: Build
         shell: cmd
+        working-directory: llama.cpp
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
-          cmake -S . -B build -G Ninja ^
-            -DCMAKE_BUILD_TYPE=Release ^
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DGGML_BACKEND_DL=ON ^
             -DGGML_NATIVE=OFF ^
             -DGGML_CPU=OFF ^
-            -DGGML_BACKEND_DL=ON ^
             -DGGML_CUDA=ON ^
-            -DGGML_CUDA_F16=ON
-          cmake --build build --config Release --target ggml-cuda
+            -DLLAMA_BUILD_BORINGSSL=ON ^
+            -DGGML_CUDA_CUB_3DOT2=ON
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS% --target ggml-cuda
 
-      - name: Collect CUDA runtime DLLs
+      - name: Collect ggml-cuda.dll + CUDA runtime
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path cudart | Out-Null
-          $cudaBin = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}\bin"
-          Copy-Item "$cudaBin\cudart64_*.dll" cudart\
-          Copy-Item "$cudaBin\cublas64_*.dll" cudart\
-          Copy-Item "$cudaBin\cublasLt64_*.dll" cudart\
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item llama.cpp\build\bin\Release\ggml-cuda.dll out\
+          foreach ($d in "$env:CUDA_PATH\bin", "$env:CUDA_PATH\bin\x64") {
+            if (Test-Path $d) { Copy-Item "$d\cudart64_*.dll", "$d\cublas64_*.dll", "$d\cublasLt64_*.dll" out\ -ErrorAction SilentlyContinue }
+          }
+          if (-not (Test-Path out\cudart64_*.dll)) { throw "CUDA runtime DLLs not found under $env:CUDA_PATH" }
+          Get-ChildItem out
 
-      - name: Upload ggml-cuda + runtime
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
-          name: llama-windows-cuda-backend
-          path: |
-            llama.cpp/build/bin/ggml-cuda.dll
-            cudart/*
+          name: llama-cuda
+          path: out/*
           if-no-files-found: error
 
   launcher:
-    name: Q38FNInference launcher (Go, windows/amd64)
+    name: Launcher (Go)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.24"
-
-      - name: Test
-        run: go test ./...
-
-      - name: Build
+      - run: go vet ./... && go test -race ./...
+      - name: Build Windows GUI exe
         env:
           GOOS: windows
           GOARCH: amd64
-        run: go build -o q38fninference.exe ./cmd/q38fninference
-
-      - uses: actions/upload-artifact@v4
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags "-H windowsgui -s -w" -o q38fninference.exe ./cmd/q38fninference
+      - uses: actions/upload-artifact@v6
         with:
-          name: q38fninference-launcher
+          name: launcher
           path: q38fninference.exe
           if-no-files-found: error
 
   package:
-    name: Merge into one release zip
-    needs: [windows-cpu, windows-cuda, launcher]
+    name: Package${{ startsWith(github.ref, 'refs/tags/v') && ' + release' || '' }}
+    needs: [llama-cpu, llama-cuda, launcher]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
         with:
-          name: llama-windows-cpu-base
-          path: out
-      - uses: actions/download-artifact@v4
+          name: llama-cpu
+          path: dist/Q38FNInference
+      - uses: actions/download-artifact@v7
         with:
-          name: llama-windows-cuda-backend
-          path: out
-      - uses: actions/download-artifact@v4
+          name: llama-cuda
+          path: dist/Q38FNInference
+      - uses: actions/download-artifact@v7
         with:
-          name: q38fninference-launcher
-          path: out
+          name: launcher
+          path: dist/Q38FNInference
 
-      - name: Zip release
+      - name: Assemble
         run: |
-          cd out
-          zip -r ../Q38FNInference-windows-cuda-x64.zip .
+          set -eu
+          d=dist/Q38FNInference
+          test -f "$d/llama-server.exe" && test -f "$d/ggml-cuda.dll" && test -f "$d/q38fninference.exe"
+          cp LICENSE "$d/LICENSE.txt"
+          cat > "$d/README.txt" <<'EOF'
+          Q38FNInference - Qwen3.8-Flash-Next launcher (Windows, NVIDIA CUDA)
 
-      - uses: actions/upload-artifact@v4
+          1. Run q38fninference.exe. The control panel opens in your browser
+             (http://127.0.0.1:8787). Running it again just reopens the panel.
+          2. Models tab: pick a local GGUF or download one from Hugging Face.
+          3. Run tab: check the GPU selection and launch plan, then Start.
+          4. Chat tab, or llama.cpp's web UI and the OpenAI-compatible API at
+             http://127.0.0.1:8080/v1 (streaming and non-streaming).
+          5. Quit (top right) stops the model and exits.
+
+          Requires an NVIDIA driver supporting CUDA 12.4 (R550 or newer).
+          Settings and launcher.log live in %APPDATA%\Q38FNInference.
+          Downloaded models go to %APPDATA%\Q38FNInference\models.
+          EOF
+          sed -i 's/$/\r/' "$d/README.txt"
+          ls -la "$d"
+          (cd dist && zip -r -9 ../Q38FNInference-windows-x64-cuda12.zip Q38FNInference)
+          cp "$d/q38fninference.exe" q38fninference.exe
+
+      - uses: actions/upload-artifact@v6
         with:
-          name: Q38FNInference-windows-cuda-x64
-          path: Q38FNInference-windows-cuda-x64.zip
-          if-no-files-found: error
+          name: Q38FNInference-windows-x64-cuda12
+          path: Q38FNInference-windows-x64-cuda12.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Q38FNInference ${{ github.ref_name }}
+          body: |
+            Windows x64 build with NVIDIA CUDA 12.4 (driver R550+).
+
+            **Download `Q38FNInference-windows-x64-cuda12.zip`**, extract it anywhere, and run `q38fninference.exe` — the control panel opens in your browser.
+            It contains the launcher plus llama.cpp (`llama-server.exe`, CPU backends, `ggml-cuda.dll`, CUDA runtime) built from ggml-org/llama.cpp@${{ env.LLAMA_CPP_REF }} with this repo's patches.
+
+            `q38fninference.exe` on its own is only the launcher; it needs `llama-server.exe` next to it (or its path set in Settings).
+          files: |
+            Q38FNInference-windows-x64-cuda12.zip
+            q38fninference.exe
+          fail_on_unmatched_files: true

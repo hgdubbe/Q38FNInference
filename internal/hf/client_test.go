@@ -153,3 +153,12 @@ func TestDownloadServerError(t *testing.T) {
 		t.Error("destPath should not exist after a failed download")
 	}
 }
+
+func TestFileURLKeepsSubfolders(t *testing.T) {
+	c := NewClient("")
+	got := c.FileURL("Org/Repo", "Q4_K_M/model 1-00001-of-00002.gguf")
+	want := "https://huggingface.co/Org/Repo/resolve/main/Q4_K_M/model%201-00001-of-00002.gguf"
+	if got != want {
+		t.Errorf("FileURL = %q, want %q", got, want)
+	}
+}
