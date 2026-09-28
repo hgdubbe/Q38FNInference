@@ -39,6 +39,9 @@ const AppID = "q38fninference"
 type Hooks struct {
 	OpenURL func(string)
 	Quit    func()
+	// HasTray: a tray icon shows the launcher is running and can quit it,
+	// so closing the panel only exits when the user asked for that.
+	HasTray bool
 }
 
 // Server holds every piece of state the API handlers touch.
@@ -623,6 +626,27 @@ func (s *Server) handleServerLogsStream(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// ModelStatus summarizes the llama-server child for the tray: "stopped",
+// "loading" or "ready", and the model file's name.
+func (s *Server) ModelStatus() (state, model string) {
+	st := s.llama.Status()
+	if !st.Running {
+		return "stopped", ""
+	}
+	for i, a := range st.Args {
+		if a == "--model" && i+1 < len(st.Args) {
+			model = strings.TrimSuffix(filepath.Base(st.Args[i+1]), ".gguf")
+		}
+	}
+	if st.Ready {
+		return "ready", model
+	}
+	return "loading", model
+}
+
+// ChatURL is where llama-server's web UI is served (through the proxy).
+func (s *Server) ChatURL() string { return s.apiURL() + "/" }
+
 func (s *Server) panelOpened() {
 	s.mu.Lock()
 	s.panels++
@@ -644,13 +668,13 @@ func (s *Server) panelClosed() {
 func (s *Server) panelAbandoned(now time.Time, grace time.Duration) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.panelSeen && s.panels == 0 && !s.cfg.KeepRunning && now.Sub(s.panelsGone) >= grace
+	exit := s.cfg.ExitWithPanel || !s.hooks.HasTray
+	return exit && s.panelSeen && s.panels == 0 && now.Sub(s.panelsGone) >= grace
 }
 
 // QuitWhenPanelClosed calls the Quit hook once no control panel has been
-// open for grace (unless Keep running is set): the launcher has no window
-// of its own, so otherwise closing the browser would leave it, and any
-// loaded model with its VRAM, running invisibly.
+// open for grace, if that behaviour applies (see Hooks.HasTray and
+// Config.ExitWithPanel).
 func (s *Server) QuitWhenPanelClosed(ctx context.Context, grace time.Duration) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()

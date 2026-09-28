@@ -26,10 +26,12 @@ build of `ggml-org/llama.cpp`'s `llama-server`.
 Get `Q38FNInference-windows-x64-cuda12.zip` from the
 [Releases](https://github.com/hgdubbe/Q38FNInference/releases) page, extract
 it, and run `q38fninference.exe`. It needs an NVIDIA driver that supports
-CUDA 12.4 (R550 or newer). Running the exe again while it's open just
-reopens the control panel; **Quit** (top right) stops the model and exits.
-Closing all panel tabs does the same after 15 seconds, unless "keep running"
-is ticked in Settings (to keep serving the API).
+CUDA 12.4 (R550 or newer). The launcher lives in the system tray:
+left-click the icon to open the control panel, right-click for the model's
+status, the chat UI and **Quit** (stops the model and exits; the panel has
+a Quit button too). Running the exe again while it's open just reopens the
+panel. Closing the panel leaves it running unless "exit when this panel is
+closed" is ticked in Settings.
 
 Settings and `launcher.log` live in `%APPDATA%\Q38FNInference`; downloaded
 models go to `%APPDATA%\Q38FNInference\models`.

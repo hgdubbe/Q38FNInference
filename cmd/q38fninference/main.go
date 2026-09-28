@@ -1,8 +1,8 @@
 // Command q38fninference is the launcher: it serves the local control panel,
 // fronts llama-server with the OpenAI-compatible API port, and opens the
 // control panel in the default browser. Release builds are linked as a
-// Windows GUI app (no console window); logs go to launcher.log in the
-// config directory, and the app exits via the panel's Quit button.
+// Windows GUI app (no console window) with a tray icon to reopen the panel
+// or quit; logs go to launcher.log in the config directory.
 package main
 
 import (
@@ -25,6 +25,7 @@ import (
 	"github.com/hgdubbe/q38fninference/internal/appconfig"
 	"github.com/hgdubbe/q38fninference/internal/browser"
 	"github.com/hgdubbe/q38fninference/internal/httpapi"
+	"github.com/hgdubbe/q38fninference/internal/tray"
 )
 
 func main() {
@@ -56,7 +57,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv, err := httpapi.New(httpapi.Hooks{OpenURL: open, Quit: stop})
+	srv, err := httpapi.New(httpapi.Hooks{OpenURL: open, Quit: stop, HasTray: tray.Available})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -82,7 +83,8 @@ func main() {
 
 	go srv.QuitWhenPanelClosed(ctx, 15*time.Second)
 
-	<-ctx.Done()
+	// blocks until Quit (tray, panel or Ctrl+C); must stay on the main goroutine
+	tray.Run(ctx, trayApp{srv: srv, panelURL: panelURL, open: open, quit: stop})
 	log.Printf("shutting down")
 	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -127,3 +129,15 @@ func setupLog() {
 	}
 	log.SetOutput(io.MultiWriter(f, os.Stderr)) // file first: stderr is invalid in a GUI exe
 }
+
+type trayApp struct {
+	srv      *httpapi.Server
+	panelURL string
+	open     func(string)
+	quit     func()
+}
+
+func (a trayApp) OpenPanel()                    { a.open(a.panelURL) }
+func (a trayApp) OpenChat()                     { a.open(a.srv.ChatURL()) }
+func (a trayApp) ModelStatus() (string, string) { return a.srv.ModelStatus() }
+func (a trayApp) Quit()                         { a.quit() }

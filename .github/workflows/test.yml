@@ -20,3 +20,29 @@ jobs:
           GOOS: windows
           GOARCH: amd64
         run: go build -o /dev/null ./cmd/q38fninference
+
+  # the tray icon only exists on Windows: check the exe starts, serves the
+  # panel, and exits cleanly on Quit with the tray loop on the main thread
+  windows-smoke:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+      - run: go build -ldflags "-H windowsgui" -o q38fninference.exe ./cmd/q38fninference
+      - name: Start, query, quit
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\q38fninference.exe -ArgumentList "-no-browser" -PassThru
+          $info = $null
+          for ($i = 0; $i -lt 30 -and -not $info; $i++) {
+            Start-Sleep -Milliseconds 500
+            try { $info = Invoke-RestMethod http://127.0.0.1:8787/api/info } catch {}
+          }
+          if (-not $info -or $info.app -ne "q38fninference") { throw "panel did not come up" }
+          if ($p.HasExited) { throw "exited early with $($p.ExitCode)" }
+          Invoke-RestMethod -Method Post http://127.0.0.1:8787/api/quit | Out-Null
+          if (-not $p.WaitForExit(10000)) { Stop-Process $p -Force; throw "did not exit within 10 s of Quit" }
+          Get-Content "$env:APPDATA\Q38FNInference\launcher.log"
+          Write-Host "exit code $($p.ExitCode)"

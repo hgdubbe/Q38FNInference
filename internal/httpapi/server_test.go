@@ -88,7 +88,7 @@ func TestSizeCheckFlagsUndercount(t *testing.T) {
 }
 
 func TestPanelAbandoned(t *testing.T) {
-	s := newTestServer(t)
+	s := newTestServer(t) // no tray: closing the panel exits
 	now := time.Now()
 	if s.panelAbandoned(now, time.Second) {
 		t.Error("must not exit before any panel was ever opened (browser may have failed to launch)")
@@ -106,8 +106,13 @@ func TestPanelAbandoned(t *testing.T) {
 	if !s.panelAbandoned(time.Now().Add(16*time.Second), 15*time.Second) {
 		t.Error("should exit after the grace period with no panel open")
 	}
-	s.cfg.KeepRunning = true
+
+	s.hooks.HasTray = true
 	if s.panelAbandoned(time.Now().Add(time.Hour), 15*time.Second) {
-		t.Error("keep_running must suppress the exit")
+		t.Error("with a tray icon the launcher keeps running unless exit_with_panel is set")
+	}
+	s.cfg.ExitWithPanel = true
+	if !s.panelAbandoned(time.Now().Add(time.Hour), 15*time.Second) {
+		t.Error("exit_with_panel must make it exit even with a tray icon")
 	}
 }
