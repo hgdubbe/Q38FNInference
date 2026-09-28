@@ -1,0 +1,6 @@
+/dist/
+/.build/
+*.exe
+*.gguf
+/q38fninference
+/out/

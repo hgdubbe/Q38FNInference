@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Q38FNInference</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Q38FNInference</h1>
+  <span class="sub">Qwen3.8-Flash-Next launcher</span>
+</header>
+
+<nav id="tabs">
+  <button class="tab-btn active" data-tab="models">Models</button>
+  <button class="tab-btn" data-tab="run">Run</button>
+  <button class="tab-btn" data-tab="settings">Settings</button>
+</nav>
+
+<main>
+  <section id="tab-models" class="tab-panel active">
+    <div class="panel">
+      <h2>Local models</h2>
+      <p class="hint">Scanned from the Hugging Face cache and this app's models folder.</p>
+      <div id="local-models" class="list"></div>
+      <button id="refresh-local">Refresh</button>
+    </div>
+
+    <div class="panel">
+      <h2>Download from Hugging Face</h2>
+      <div class="row">
+        <input id="hf-repo" placeholder="Qwen/Qwen3.8-Flash-Next" value="Qwen/Qwen3.8-Flash-Next">
+        <button id="hf-list-files">List GGUF files</button>
+      </div>
+      <div id="hf-files" class="list"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Downloads</h2>
+      <div id="downloads" class="list"></div>
+    </div>
+  </section>
+
+  <section id="tab-run" class="tab-panel">
+    <div class="panel">
+      <h2>Selected model</h2>
+      <div id="selected-model" class="hint">No model selected — pick one from the Models tab.</div>
+    </div>
+
+    <div class="panel">
+      <h2>GPU</h2>
+      <div id="gpu-info" class="hint">Detecting…</div>
+    </div>
+
+    <div class="panel">
+      <h2>Launch plan</h2>
+      <div id="tune-plan" class="hint">Select a model to compute an offload plan.</div>
+      <div class="row">
+        <label>Context size override: <input id="ctx-override" type="number" placeholder="auto"></label>
+        <button id="retune">Recompute</button>
+      </div>
+      <pre id="tune-args"></pre>
+    </div>
+
+    <div class="panel">
+      <div class="row">
+        <button id="start-server">Start server</button>
+        <button id="stop-server">Stop server</button>
+        <span id="server-status" class="hint"></span>
+      </div>
+      <div class="row" id="server-links" style="display:none">
+        <a id="link-webui" target="_blank">Open web UI</a>
+        <a id="link-api" target="_blank">OpenAI API docs</a>
+      </div>
+      <h3>Log</h3>
+      <pre id="server-log" class="log"></pre>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="tab-panel">
+    <div class="panel">
+      <h2>Settings</h2>
+      <div class="row"><label>llama-server path <input id="cfg-bin" placeholder="auto-detect"></label></div>
+      <div class="row"><label>Port <input id="cfg-port" type="number"></label></div>
+      <div class="row"><label>Hugging Face token <input id="cfg-token" type="password" placeholder="optional, for gated repos"></label></div>
+      <div class="row"><label>Extra model directories (one per line)
+        <textarea id="cfg-dirs" rows="3"></textarea>
+      </label></div>
+      <button id="save-settings">Save</button>
+      <span id="settings-status" class="hint"></span>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
