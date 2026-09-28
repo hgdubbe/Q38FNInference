@@ -56,7 +56,8 @@ llama.cpp with CUDA:
 
 - CI: `.github/workflows/build-windows-cuda.yml` builds llama.cpp (pinned
   commit, with `patches/` applied) and the launcher, and publishes a release
-  when a `v*` tag is pushed. It can also be run manually from the Actions tab.
+  when a `v*` tag is pushed, or when a pushed commit message contains
+  `[release]` (it then tags that commit `v` + the contents of `VERSION`).
 - Locally on Windows: `.\scripts\build-windows-cuda.ps1` (Visual Studio with
   C++ and Clang tools, CMake, Ninja, CUDA Toolkit 12.4+, Go) produces the same
   folder in `dist\Q38FNInference`.

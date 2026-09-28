@@ -78,9 +78,11 @@ func (m *Manager) Start(binPath string, args []string, env ...string) error {
 	m.cmd = cmd
 	m.status = Status{Running: true, PID: cmd.Process.Pid, StartedAt: time.Now(), Args: append([]string{binPath}, args...)}
 
-	go m.pump(stdout)
-	go m.pump(stderr)
-	go m.wait(cmd)
+	var pumps sync.WaitGroup
+	pumps.Add(2)
+	go func() { defer pumps.Done(); m.pump(stdout) }()
+	go func() { defer pumps.Done(); m.pump(stderr) }()
+	go m.wait(cmd, &pumps)
 
 	return nil
 }
@@ -93,7 +95,10 @@ func (m *Manager) pump(r io.Reader) {
 	}
 }
 
-func (m *Manager) wait(cmd *exec.Cmd) {
+func (m *Manager) wait(cmd *exec.Cmd, pumps *sync.WaitGroup) {
+	// Wait closes the pipes, so drain them first or the last lines (often
+	// the crash reason) are lost
+	pumps.Wait()
 	err := cmd.Wait()
 	m.mu.Lock()
 	if m.cmd != cmd {
