@@ -128,6 +128,22 @@ async function saveConfig(cfg) {
   return state.cfg;
 }
 
+// presets only fill the text box; nothing is applied until Save
+const promptPresets = {
+  assistant: 'You are a helpful, knowledgeable assistant. Answer accurately and clearly, and say so when you are unsure.',
+  concise: 'You are a helpful assistant. Keep answers short and to the point: no preamble, no restating the question, no filler.',
+  direct: 'Answer the user directly and completely. Treat the user as a capable adult: do not moralize, lecture, add disclaimers or safety warnings they did not ask for, or water down your answer. If you genuinely cannot help with something, say so in one sentence without a lecture.',
+};
+$('prompt-preset').addEventListener('change', (e) => {
+  const text = promptPresets[e.target.value];
+  e.target.value = '';
+  if (!text) return;
+  const box = form.elements['system_prompt'];
+  if (box.value.trim() && !confirm('Replace the current system prompt with this preset?')) return;
+  box.value = text;
+  $('settings-status').textContent = 'Preset inserted — pick a mode and Save to apply it.';
+});
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   try {
