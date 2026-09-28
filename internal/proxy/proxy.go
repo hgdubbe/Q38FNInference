@@ -23,6 +23,9 @@ const (
 	ModeOff      Mode = "off"      // never touch requests
 	ModeDefault  Mode = "default"  // add the prompt only if the request has none
 	ModeOverride Mode = "override" // replace whatever system prompt the request has
+	// ModeCombine puts the prompt in front of the request's own system prompt,
+	// e.g. to steer a coding agent without dropping its tool instructions
+	ModeCombine Mode = "combine"
 )
 
 const maxBody = 64 << 20
@@ -132,6 +135,18 @@ func rewriteOpenAI(req map[string]any, mode Mode, prompt string) bool {
 	if !ok {
 		return false
 	}
+	if mode == ModeCombine && len(msgs) > 0 && isSystemRole(msgs[0]) {
+		// merge into the first system message: many chat templates accept
+		// only one, and only at the start
+		first := msgs[0].(map[string]any)
+		merged := make(map[string]any, len(first))
+		for k, v := range first {
+			merged[k] = v
+		}
+		merged["content"] = prependText(prompt, first["content"])
+		req["messages"] = append([]any{merged}, msgs[1:]...)
+		return true
+	}
 	hasSystem := false
 	kept := make([]any, 0, len(msgs)+1)
 	for _, m := range msgs {
@@ -151,9 +166,30 @@ func rewriteOpenAI(req map[string]any, mode Mode, prompt string) bool {
 }
 
 func rewriteAnthropic(req map[string]any, mode Mode, prompt string) bool {
-	if _, has := req["system"]; has && mode == ModeDefault {
+	existing, has := req["system"]
+	switch {
+	case has && mode == ModeDefault:
 		return false
+	case has && mode == ModeCombine:
+		req["system"] = prependText(prompt, existing)
+	default:
+		req["system"] = prompt
 	}
-	req["system"] = prompt
 	return true
+}
+
+// prependText puts prompt before content, which is either a plain string or
+// a list of typed content parts.
+func prependText(prompt string, content any) any {
+	switch c := content.(type) {
+	case string:
+		if c == "" {
+			return prompt
+		}
+		return prompt + "\n\n" + c
+	case []any:
+		return append([]any{map[string]any{"type": "text", "text": prompt + "\n\n"}}, c...)
+	default:
+		return prompt
+	}
 }

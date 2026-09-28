@@ -146,3 +146,31 @@ func TestStreamingPassesThrough(t *testing.T) {
 		t.Errorf("stream = %q", b)
 	}
 }
+
+func TestCombineMergesIntoClientSystemPrompt(t *testing.T) {
+	_, u := backend(t)
+	p := New()
+	p.SetTarget(u)
+	p.SetSystemPrompt(ModeCombine, "be careful")
+
+	msgs := messages(t, post(t, p, "/v1/chat/completions", `{"messages":[{"role":"system","content":"agent tools: ..."},{"role":"user","content":"hi"}]}`))
+	if len(msgs) != 2 || msgs[0]["content"] != "be careful\n\nagent tools: ..." {
+		t.Errorf("messages = %v, want one merged system message", msgs)
+	}
+
+	msgs = messages(t, post(t, p, "/v1/chat/completions", `{"messages":[{"role":"system","content":[{"type":"text","text":"tools"}]},{"role":"user","content":"hi"}]}`))
+	parts := msgs[0]["content"].([]any)
+	if len(parts) != 2 || parts[0].(map[string]any)["text"] != "be careful\n\n" {
+		t.Errorf("content parts = %v, want the prompt prepended as a text part", parts)
+	}
+
+	msgs = messages(t, post(t, p, "/v1/chat/completions", `{"messages":[{"role":"user","content":"hi"}]}`))
+	if len(msgs) != 2 || msgs[0]["content"] != "be careful" {
+		t.Errorf("messages = %v, want the prompt inserted when the client sent none", msgs)
+	}
+
+	out := post(t, p, "/v1/messages", `{"system":"client","messages":[]}`)
+	if out["system"] != "be careful\n\nclient" {
+		t.Errorf("anthropic system = %v", out["system"])
+	}
+}
