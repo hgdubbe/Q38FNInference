@@ -27,6 +27,7 @@ import (
 	"github.com/hgdubbe/q38fninference/internal/hf"
 	"github.com/hgdubbe/q38fninference/internal/models"
 	"github.com/hgdubbe/q38fninference/internal/proxy"
+	"github.com/hgdubbe/q38fninference/internal/reasoning"
 	"github.com/hgdubbe/q38fninference/internal/server"
 	"github.com/hgdubbe/q38fninference/internal/tuning"
 )
@@ -365,8 +366,9 @@ func (s *Server) handleHFDownloadsList(w http.ResponseWriter, r *http.Request) {
 // --- tuning -----------------------------------------------------------------
 
 type tuneResponse struct {
-	Plan *tuning.Plan `json:"plan"`
-	Args []string     `json:"args"`
+	Plan      *tuning.Plan `json:"plan"`
+	Args      []string     `json:"args"`
+	Reasoning string       `json:"reasoning"` // detected reasoning-control style
 }
 
 func (s *Server) tune(modelPath string) (*tuneResponse, error) {
@@ -390,7 +392,16 @@ func (s *Server) tune(modelPath string) (*tuneResponse, error) {
 	if note := sizeCheck(modelPath, meta); note != "" {
 		plan.Notes = append(plan.Notes, note)
 	}
-	return &tuneResponse{Plan: plan, Args: append(plan.Args(modelPath), ms.Args()...)}, nil
+
+	tmpl, _ := meta.KV["tokenizer.chat_template"].(string)
+	style := reasoning.Detect(tmpl)
+	level := reasoning.Level(ms.Reasoning)
+	if level == "" {
+		level = reasoning.High
+	}
+	args := append(plan.Args(modelPath), ms.Args()...)
+	args = append(args, style.Args(level)...)
+	return &tuneResponse{Plan: plan, Args: args, Reasoning: style.Name}, nil
 }
 
 // sizeCheck flags a plan built from fewer tensor bytes than the model files

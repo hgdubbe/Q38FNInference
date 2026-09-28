@@ -79,7 +79,7 @@ document.querySelectorAll('.tab-btn').forEach((b) => b.addEventListener('click',
 const form = $('settings-form');
 const numberFields = new Set(['port', 'model.ctx_size', 'model.parallel', 'model.threads', 'model.batch_size',
   'model.ubatch_size', 'model.temperature', 'model.top_p', 'model.top_k', 'model.min_p', 'model.repeat_penalty',
-  'model.presence_penalty', 'model.max_tokens', 'model.seed', 'model.reasoning_budget']);
+  'model.presence_penalty', 'model.max_tokens', 'model.seed']);
 
 function getPath(obj, path) {
   return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
@@ -97,7 +97,12 @@ function fillForm(cfg) {
     const v = getPath(cfg, f.name);
     if (f.type === 'checkbox') f.checked = !!v;
     else if (f.name === 'extra_model_dirs') f.value = (v || []).join('\n');
-    else f.value = v == null ? '' : v;
+    else if (f.tagName === 'SELECT') {
+      // unset or legacy values (e.g. reasoning "on") fall back to the marked default
+      const ok = [...f.options].some((o) => o.value === String(v));
+      const def = f.querySelector('option[selected]') || f.options[0];
+      f.value = v != null && v !== '' && ok ? v : def.value;
+    } else f.value = v == null ? '' : v;
   }
 }
 
@@ -309,6 +314,7 @@ async function computeTune() {
     }
     lines.push(`GPU layers: ${p.NGpuLayers}` + (p.NCPUMoE ? `, experts of the first ${p.NCPUMoE} blocks in CPU RAM` : ''));
     lines.push(`context: ${p.CtxSize} tokens, KV cache ${p.CacheTypeKV}, ${p.Parallel} slot(s)`);
+    lines.push(`reasoning controls: ${resp.reasoning}`);
     lines.push(`on GPU ${fmtBytes(p.GPUFitBytes)} · in RAM ${fmtBytes(p.CPUFitBytes)} · total ${fmtBytes(p.TotalBytes)}`);
     (p.Notes || []).forEach((n) => lines.push('• ' + n));
     out.textContent = lines.join('\n');

@@ -70,12 +70,10 @@ func TestLocateLlamaServerReturnsEmptyWhenNotFound(t *testing.T) {
 }
 
 func TestModelSettingsArgs(t *testing.T) {
-	temp, topK, seed, budget := 0.6, 20, int64(42), 0
-	s := ModelSettings{Threads: 8, Temperature: &temp, TopK: &topK, Seed: &seed, Reasoning: "on",
-		ReasoningBudget: &budget, ReasoningBudgetMessage: "Answer now.", ReasoningEffort: "low", ExtraArgs: "--mlock  --no-mmap"}
+	temp, topK, seed := 0.6, 20, int64(42)
+	s := ModelSettings{Threads: 8, Temperature: &temp, TopK: &topK, Seed: &seed, Reasoning: "low", ExtraArgs: "--mlock  --no-mmap"}
 	got := s.Args()
-	want := []string{"--threads", "8", "--temp", "0.6", "--top-k", "20", "--seed", "42", "--reasoning", "on",
-		"--reasoning-budget", "0", "--reasoning-budget-message", "Answer now.", "--reasoning-effort", "low", "--mlock", "--no-mmap"}
+	want := []string{"--threads", "8", "--temp", "0.6", "--top-k", "20", "--seed", "42", "--mlock", "--no-mmap"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Args() = %v, want %v", got, want)
 	}
