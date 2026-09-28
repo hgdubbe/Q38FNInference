@@ -169,11 +169,12 @@
           </select>
         </label>
         <label class="inline"><input type="checkbox" name="open_chat_on_ready"> open llama.cpp web UI when a model is ready</label>
+        <label class="inline"><input type="checkbox" name="keep_running"> keep running after this panel is closed (API stays up)</label>
       </div>
       <label class="block">llama-server path <input name="llama_server_path" class="wide" placeholder="auto-detect (next to this app, llama\ subfolder, or PATH)"></label>
       <label class="block">Hugging Face token <input name="hf_token" type="password" class="wide" placeholder="optional, for gated repos"></label>
       <label class="block">Extra model folders (one per line) <textarea name="extra_model_dirs" rows="3" class="wide"></textarea></label>
-      <p class="hint">Port and bind address changes take effect after restarting the launcher.</p>
+      <p class="hint">Port and bind address changes take effect after restarting the launcher. Unless "keep running" is ticked, closing every control panel tab stops the model and exits the launcher after 15 seconds; run the exe again to reopen it.</p>
     </div>
     <div class="row">
       <button type="submit">Save settings</button>

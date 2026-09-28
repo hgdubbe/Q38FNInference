@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hgdubbe/q38fninference/internal/gguf"
 )
@@ -83,5 +84,30 @@ func TestSizeCheckFlagsUndercount(t *testing.T) {
 	meta.Tensors[0].Dims = []uint64{2400} // 9600 bytes: within 10%
 	if note := sizeCheck(p, meta); note != "" {
 		t.Errorf("sizeCheck = %q, want no warning", note)
+	}
+}
+
+func TestPanelAbandoned(t *testing.T) {
+	s := newTestServer(t)
+	now := time.Now()
+	if s.panelAbandoned(now, time.Second) {
+		t.Error("must not exit before any panel was ever opened (browser may have failed to launch)")
+	}
+	s.panelOpened()
+	s.panelOpened() // two tabs
+	s.panelClosed()
+	if s.panelAbandoned(now.Add(time.Hour), time.Second) {
+		t.Error("one tab is still open")
+	}
+	s.panelClosed()
+	if s.panelAbandoned(time.Now(), 15*time.Second) {
+		t.Error("must wait out the grace period (page reloads reconnect within it)")
+	}
+	if !s.panelAbandoned(time.Now().Add(16*time.Second), 15*time.Second) {
+		t.Error("should exit after the grace period with no panel open")
+	}
+	s.cfg.KeepRunning = true
+	if s.panelAbandoned(time.Now().Add(time.Hour), 15*time.Second) {
+		t.Error("keep_running must suppress the exit")
 	}
 }

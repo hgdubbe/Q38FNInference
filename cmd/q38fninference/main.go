@@ -80,13 +80,22 @@ func main() {
 		open(panelURL)
 	}
 
+	go srv.QuitWhenPanelClosed(ctx, 15*time.Second)
+
 	<-ctx.Done()
 	log.Printf("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	srv.Shutdown(shutdownCtx)
-	_ = api.Shutdown(shutdownCtx)
-	_ = panel.Shutdown(shutdownCtx)
+	srv.Shutdown(stopCtx) // stop llama-server first so its VRAM is released
+	// open log streams and in-flight completions never go idle, so don't
+	// wait on them for long
+	for _, h := range []*http.Server{api, panel} {
+		c, cancel := context.WithTimeout(context.Background(), time.Second)
+		if h.Shutdown(c) != nil {
+			h.Close()
+		}
+		cancel()
+	}
 }
 
 func serve(s *http.Server, ln net.Listener) {

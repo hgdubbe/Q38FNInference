@@ -41,6 +41,11 @@ type Config struct {
 	// OpenChatOnReady opens the chat web UI once a started model is loaded.
 	OpenChatOnReady bool `json:"open_chat_on_ready"`
 
+	// KeepRunning keeps the launcher (and a loaded model) running after the
+	// control panel tab is closed, e.g. to serve the API to other clients.
+	// Otherwise it exits shortly after the last panel tab goes away.
+	KeepRunning bool `json:"keep_running"`
+
 	Model ModelSettings `json:"model"`
 }
 

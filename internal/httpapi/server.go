@@ -53,6 +53,11 @@ type Server struct {
 	hooks     Hooks
 	apiErr    string
 
+	// open control-panel tabs, counted by their log-stream connections
+	panels     int
+	panelSeen  bool
+	panelsGone time.Time
+
 	mux *http.ServeMux
 }
 
@@ -593,6 +598,9 @@ func (s *Server) handleServerLogsStream(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 
+	s.panelOpened()
+	defer s.panelClosed()
+
 	// subscribe before snapshotting so no line falls between the two
 	ch, unsub := s.llama.Subscribe()
 	defer unsub()
@@ -611,6 +619,53 @@ func (s *Server) handleServerLogsStream(w http.ResponseWriter, r *http.Request) 
 			}
 			fmt.Fprintf(w, "data: %s\n\n", jsonString(line))
 			flusher.Flush()
+		}
+	}
+}
+
+func (s *Server) panelOpened() {
+	s.mu.Lock()
+	s.panels++
+	s.panelSeen = true
+	s.mu.Unlock()
+}
+
+func (s *Server) panelClosed() {
+	s.mu.Lock()
+	s.panels--
+	if s.panels == 0 {
+		s.panelsGone = time.Now()
+	}
+	s.mu.Unlock()
+}
+
+// panelAbandoned reports whether every control-panel tab has been closed
+// for at least grace. A page reload reconnects well within it.
+func (s *Server) panelAbandoned(now time.Time, grace time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.panelSeen && s.panels == 0 && !s.cfg.KeepRunning && now.Sub(s.panelsGone) >= grace
+}
+
+// QuitWhenPanelClosed calls the Quit hook once no control panel has been
+// open for grace (unless Keep running is set): the launcher has no window
+// of its own, so otherwise closing the browser would leave it, and any
+// loaded model with its VRAM, running invisibly.
+func (s *Server) QuitWhenPanelClosed(ctx context.Context, grace time.Duration) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			if s.panelAbandoned(now, grace) {
+				log.Printf("control panel closed for %s; exiting", grace)
+				if s.hooks.Quit != nil {
+					s.hooks.Quit()
+				}
+				return
+			}
 		}
 	}
 }
