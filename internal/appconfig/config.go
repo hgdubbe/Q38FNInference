@@ -46,6 +46,13 @@ type Config struct {
 	// launcher always does this, since nothing else would show it running.
 	ExitWithPanel bool `json:"exit_with_panel"`
 
+	// OnDemand runs llama-server as a router offering every local model,
+	// loading whichever one a request names (one at a time).
+	OnDemand bool `json:"on_demand"`
+	// IdleUnloadMinutes frees the loaded model after this long without
+	// requests; the next request reloads it. 0 keeps it loaded.
+	IdleUnloadMinutes int `json:"idle_unload_minutes,omitempty"`
+
 	Model ModelSettings `json:"model"`
 }
 

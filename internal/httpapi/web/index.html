@@ -26,6 +26,16 @@
 <main>
   <section id="tab-run" class="tab-panel active">
     <div class="panel">
+      <h2>Mode</h2>
+      <div class="row">
+        <label class="inline"><input type="radio" name="run-mode" value="single" checked> Single model — start one model from this panel</label>
+      </div>
+      <div class="row">
+        <label class="inline"><input type="radio" name="run-mode" value="ondemand"> On-demand — offer every local model through the API and load whichever a request names (one at a time)</label>
+      </div>
+    </div>
+
+    <div class="panel only-single">
       <h2>Model</h2>
       <div id="selected-model" class="hint">No model selected — pick one in the Models tab.</div>
     </div>
@@ -36,14 +46,30 @@
       <p class="hint">Unticked GPUs are hidden from llama-server. Selection is saved.</p>
     </div>
 
-    <div class="panel">
+    <div class="panel only-single">
       <h2>Launch plan</h2>
       <div id="tune-plan" class="hint">Select a model to compute an offload plan.</div>
       <label class="block">llama-server arguments (editable)
         <textarea id="tune-args" rows="4" spellcheck="false"></textarea>
       </label>
+      <div class="row"><button id="retune" class="secondary">Recompute plan</button></div>
+    </div>
+
+    <div class="panel only-ondemand">
+      <h2>Models</h2>
+      <p class="hint">Each model gets its own launch plan (same settings as single mode). API clients pick one with the <code>model</code> field, list them with <code>GET /v1/models</code> or <code>GET /models</code>, and can load or unload explicitly with <code>POST /models/load</code> / <code>POST /models/unload</code> <code>{"model": "…"}</code>. New downloads are picked up within 30 seconds.</p>
       <div class="row">
-        <button id="retune" class="secondary">Recompute plan</button>
+        <label>Unload after idle (minutes, 0 = never)
+          <input id="idle-unload" type="number" min="0" style="min-width:0;width:8em">
+        </label>
+        <button id="router-rescan" class="secondary">Rescan now</button>
+      </div>
+      <div id="router-models" class="list"><div class="hint">Start the server to see the models and their status.</div></div>
+      <div id="router-notes" class="hint"></div>
+    </div>
+
+    <div class="panel">
+      <div class="row">
         <button id="start-server">Start</button>
         <button id="stop-server" class="danger">Stop</button>
         <span id="server-status" class="hint"></span>
@@ -63,6 +89,7 @@
 
   <section id="tab-chat" class="tab-panel">
     <div class="panel chat">
+      <div class="row only-ondemand"><label>Model <select id="chat-model"></select></label></div>
       <div id="chat-log"></div>
       <div class="hint" id="chat-sys"></div>
       <div class="row">
@@ -167,7 +194,7 @@
         <label>API key <input name="model.api_key" type="password" placeholder="none"></label>
       </div>
       <p class="hint">Reasoning is translated to whatever the model's chat template supports (on/off switch, effort level or thinking budget; the Run tab shows which). Levels a model can't express natively are enforced as a thinking-token cap: low 1024, medium 4096, high unlimited.</p>
-      <label class="block">Extra llama-server arguments <input name="model.extra_args" class="wide" placeholder="--mlock --no-mmap"></label>
+      <label class="block">Extra llama-server arguments <input name="model.extra_args" class="wide" placeholder="e.g. --load-mode mmap+mlock"></label>
     </div>
 
     <div class="panel">

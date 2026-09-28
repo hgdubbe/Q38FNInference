@@ -56,6 +56,8 @@ type Server struct {
 	hooks     Hooks
 	apiErr    string
 
+	router *routerRun // set while llama-server runs in on-demand (router) mode
+
 	// open control-panel tabs, counted by their log-stream connections
 	panels     int
 	panelSeen  bool
@@ -133,9 +135,16 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/server/status", s.handleServerStatus)
 	mux.HandleFunc("GET /api/server/logs/stream", s.handleServerLogsStream)
 
-	// same-origin access to the model API for the control panel's chat tab
+	mux.HandleFunc("POST /api/router/rescan", s.handleRouterRescan)
+	mux.HandleFunc("GET /api/router/notes", s.handleRouterNotes)
+
+	// same-origin access to the model API for the control panel's chat tab,
+	// and to the router's model list / load / unload endpoints
 	mux.Handle("GET /v1/", s.Proxy)
 	mux.Handle("POST /v1/", s.Proxy)
+	mux.Handle("GET /models", s.Proxy)
+	mux.Handle("GET /models/", s.Proxy)
+	mux.Handle("POST /models/", s.Proxy)
 
 	mux.Handle("GET /", webFS())
 	return mux
@@ -251,13 +260,7 @@ func (s *Server) selectedGPUs() ([]tuning.GPU, error) {
 }
 
 func (s *Server) handleLocalModels(w http.ResponseWriter, r *http.Request) {
-	dirs := models.DefaultSearchDirs()
-	if d, err := appconfig.ModelsDir(); err == nil && !slices.Contains(dirs, d) {
-		dirs = append(dirs, d)
-	}
-	dirs = append(dirs, s.Config().ExtraModelDirs...)
-
-	groups, err := models.Scan(dirs)
+	groups, err := models.Scan(s.modelDirs())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -380,13 +383,17 @@ type tuneResponse struct {
 }
 
 func (s *Server) tune(modelPath string) (*tuneResponse, error) {
-	meta, err := gguf.ReadModel(modelPath)
-	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", modelPath, err)
-	}
 	gpus, err := s.selectedGPUs()
 	if err != nil {
 		log.Printf("httpapi: GPU detection failed, planning CPU-only: %v", err)
+	}
+	return s.tuneWith(modelPath, gpus)
+}
+
+func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU) (*tuneResponse, error) {
+	meta, err := gguf.ReadModel(modelPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", modelPath, err)
 	}
 	ms := s.Config().Model
 	plan, err := tuning.Compute(meta, gpus, tuning.Options{
@@ -457,6 +464,9 @@ func (s *Server) handleTune(w http.ResponseWriter, r *http.Request) {
 // --- server lifecycle ---------------------------------------------------------
 
 type startRequest struct {
+	// OnDemand starts llama-server in router mode instead: every local model
+	// is offered and loaded when a request names it (see router.go)
+	OnDemand  bool     `json:"on_demand"`
 	ModelPath string   `json:"model_path"`
 	Args      []string `json:"args"`    // optional: edited plan args; recomputed if empty
 	Devices   []int    `json:"devices"` // GPU indices the args were planned for
@@ -466,6 +476,10 @@ func (s *Server) handleServerStart(w http.ResponseWriter, r *http.Request) {
 	var req startRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.OnDemand {
+		s.startRouter(w)
 		return
 	}
 	if len(req.Args) == 0 {
@@ -510,6 +524,7 @@ func (s *Server) handleServerStart(w http.ResponseWriter, r *http.Request) {
 	}
 	st := s.llama.Status()
 	target := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
+	s.setRouter(nil)
 	s.Proxy.SetTarget(target)
 	go s.watch(st.PID, target)
 
@@ -585,11 +600,22 @@ func (s *Server) handleServerStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Proxy.SetTarget(nil)
-	writeJSON(w, s.llama.Status())
+	s.setRouter(nil)
+	writeJSON(w, s.status())
+}
+
+type statusResponse struct {
+	server.Status
+	OnDemand bool `json:"OnDemand"`
+}
+
+func (s *Server) status() statusResponse {
+	st := s.llama.Status()
+	return statusResponse{Status: st, OnDemand: st.Running && s.currentRouter() != nil}
 }
 
 func (s *Server) handleServerStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.llama.Status())
+	writeJSON(w, s.status())
 }
 
 func (s *Server) handleServerLogsStream(w http.ResponseWriter, r *http.Request) {
@@ -632,6 +658,12 @@ func (s *Server) ModelStatus() (state, model string) {
 	st := s.llama.Status()
 	if !st.Running {
 		return "stopped", ""
+	}
+	if rt := s.currentRouter(); rt != nil {
+		if !st.Ready {
+			return "loading", "on-demand"
+		}
+		return "ready", rt.loadedModel()
 	}
 	for i, a := range st.Args {
 		if a == "--model" && i+1 < len(st.Args) {

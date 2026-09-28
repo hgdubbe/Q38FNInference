@@ -20,6 +20,9 @@ build of `ggml-org/llama.cpp`'s `llama-server`.
 - Chat tab for quick testing, llama.cpp's own web UI, and an OpenAI-compatible
   API at `http://127.0.0.1:8080/v1` (streaming and non-streaming; the
   Anthropic-style `/v1/messages` works too).
+- On-demand mode: every local model is offered through the API and loaded
+  when a request names it (one at a time, optional idle unload), with
+  endpoints to list, load and unload models.
 
 ## Download
 
@@ -48,6 +51,33 @@ models go to `%APPDATA%\Q38FNInference\models`.
    `http://127.0.0.1:8080/v1`.
 4. **Settings**: system prompt, model/sampling options, API port and bind
    address (127.0.0.1 or LAN), llama-server path, Hugging Face token.
+
+## API
+
+Everything goes to `http://127.0.0.1:8080` (port and bind address are in
+Settings). It is llama-server's own API, passed through the launcher's proxy
+(which only adds the system prompt), so every llama-server endpoint works:
+OpenAI-style `/v1/chat/completions`, `/v1/completions`, `/v1/models`,
+Anthropic-style `/v1/messages`, `/tokenize`, `/props`, `/health`, and so on,
+streaming or not.
+
+In **on-demand mode** (Run tab) llama-server runs as a router:
+
+| Request | What it does |
+|---|---|
+| `GET /v1/models`, `GET /models` | all available models and their status (`loaded`, `loading`, `unloaded`, `sleeping`) |
+| any completion with `"model": "<id>"` | loads that model if needed (unloading the current one) and answers |
+| `POST /models/load` `{"model": "<id>"}` | load a model ahead of time |
+| `POST /models/unload` `{"model": "<id>"}` | unload it and free the VRAM |
+| `GET /models/sse` | live model status events |
+| `POST /models` `{"model": "<hf-repo>:<quant>"}`, `DELETE /models?model=<id>` | download a model into llama.cpp's cache / delete it |
+
+Model ids are the file names without shard suffix or `.gguf` (e.g.
+`RVN-Qwen3.8-Flash-Next-IQ4_XS`). Each model loads with its own offload plan
+and the Settings → Model options. The list is rescanned every 30 seconds, so
+new downloads (from the Models tab, another tool, or `POST /models`) appear
+without a restart. With "Unload after idle" set, a model that gets no
+requests for that long is unloaded and reloads on the next request.
 
 ## Building
 

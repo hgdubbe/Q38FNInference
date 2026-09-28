@@ -380,18 +380,105 @@ async function computeTune() {
 $('retune').addEventListener('click', computeTune);
 
 $('start-server').addEventListener('click', async () => {
-  if (!state.model) { alert('Pick a model in the Models tab first.'); return; }
-  const args = splitArgs($('tune-args').value);
   try {
-    await api('POST', '/api/server/start', {
-      model_path: state.model.path,
-      args,
-      devices: state.plan ? state.plan.plan.Devices : [],
-    });
+    if (state.mode === 'ondemand') {
+      await api('POST', '/api/server/start', { on_demand: true });
+    } else {
+      if (!state.model) { alert('Pick a model in the Models tab first.'); return; }
+      await api('POST', '/api/server/start', {
+        model_path: state.model.path,
+        args: splitArgs($('tune-args').value),
+        devices: state.plan ? state.plan.plan.Devices : [],
+      });
+    }
     $('server-log').textContent = '';
     refreshServerStatus();
   } catch (e) {
     alert('Failed to start: ' + e.message);
+  }
+});
+
+// ---- mode (single / on-demand) --------------------------------------------
+
+function setMode(mode) {
+  state.mode = mode;
+  document.body.classList.toggle('mode-single', mode !== 'ondemand');
+  document.body.classList.toggle('mode-ondemand', mode === 'ondemand');
+  document.querySelectorAll('input[name=run-mode]').forEach((r) => { r.checked = r.value === mode; });
+}
+
+document.querySelectorAll('input[name=run-mode]').forEach((r) => r.addEventListener('change', async () => {
+  const cfg = JSON.parse(JSON.stringify(state.cfg));
+  cfg.on_demand = r.value === 'ondemand';
+  try { await saveConfig(cfg); } catch (e) { alert(e.message); }
+  setMode(r.value);
+  if (state.running && state.runningOnDemand !== cfg.on_demand) {
+    $('server-status').textContent = 'mode changes apply after Stop / Start';
+  }
+}));
+
+$('idle-unload').addEventListener('change', async () => {
+  const cfg = JSON.parse(JSON.stringify(state.cfg));
+  cfg.idle_unload_minutes = Math.max(0, parseInt($('idle-unload').value, 10) || 0);
+  try { await saveConfig(cfg); } catch (e) { alert(e.message); }
+});
+
+async function refreshRouterModels() {
+  const box = $('router-models');
+  let list;
+  try {
+    list = (await api('GET', '/models')).data || [];
+  } catch (e) {
+    return; // router still starting
+  }
+  box.textContent = '';
+  if (list.length === 0) box.appendChild(el('div', 'hint', 'No models found — download one in the Models tab.'));
+  for (const m of list) {
+    const st = m.status || {};
+    const status = st.value || 'unknown';
+    const failed = st.failed && status === 'unloaded';
+    const pill = el('span', 'pill ' + (failed ? 'failed' : status),
+      failed ? `load failed${st.exit_code != null ? ' (exit ' + st.exit_code + ')' : ''} — see log` : status);
+    const busy = status === 'loading' || status === 'downloading';
+    const loaded = status === 'loaded' || status === 'sleeping';
+    const btn = loaded
+      ? button('Unload', () => routerAction('unload', m.id), 'secondary')
+      : button('Load', () => routerAction('load', m.id));
+    btn.disabled = busy;
+    box.appendChild(item(m.id, m.path || '', pill, btn));
+  }
+  try {
+    const n = (await api('GET', '/api/router/notes')).notes;
+    $('router-notes').textContent = n.length ? 'Notes:\n' + n.join('\n') : '';
+  } catch (_) { /* optional */ }
+  const sel = $('chat-model');
+  const current = sel.value;
+  sel.textContent = '';
+  for (const m of list) {
+    const o = el('option', '', m.id);
+    o.value = m.id;
+    sel.appendChild(o);
+  }
+  const loadedOne = list.find((m) => m.status && m.status.value === 'loaded');
+  sel.value = list.some((m) => m.id === current) ? current : (loadedOne ? loadedOne.id : (list[0] || {}).id || '');
+}
+
+async function routerAction(action, model) {
+  try {
+    await api('POST', '/models/' + action, { model });
+  } catch (e) {
+    alert(`${action} failed: ${e.message}`);
+  }
+  refreshRouterModels();
+}
+
+$('router-rescan').addEventListener('click', async () => {
+  try {
+    const r = await api('POST', '/api/router/rescan');
+    $('router-notes').textContent = r.notes.length ? 'Not offered:\n' + r.notes.join('\n') : '';
+    setTimeout(refreshRouterModels, 1500);
+  } catch (e) {
+    $('router-notes').textContent = e.message;
   }
 });
 
@@ -417,6 +504,9 @@ async function refreshServerStatus() {
     pill.textContent = label;
     pill.className = 'pill ' + (st.Running ? label : '');
     $('server-status').textContent = st.Running ? `${label} (pid ${st.PID})` : (st.ExitErr ? 'exited: ' + st.ExitErr : '');
+    state.running = st.Running;
+    state.runningOnDemand = st.OnDemand;
+    if (st.OnDemand && st.Ready) refreshRouterModels();
     $('start-server').disabled = st.Running;
     $('stop-server').disabled = !st.Running;
     $('open-webui').disabled = !st.Ready;
@@ -467,7 +557,8 @@ async function sendChat() {
     const resp = await fetch('/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages, stream }),
+      body: JSON.stringify(Object.assign({ messages, stream },
+        state.runningOnDemand && $('chat-model').value ? { model: $('chat-model').value } : {})),
       signal: state.abort.signal,
     });
     if (!resp.ok) {
@@ -523,6 +614,8 @@ $('chat-clear').addEventListener('click', () => { state.chat = []; renderChat();
   try {
     state.cfg = await api('GET', '/api/config');
     fillForm(state.cfg);
+    setMode(state.cfg.on_demand ? 'ondemand' : 'single');
+    $('idle-unload').value = state.cfg.idle_unload_minutes || 0;
     renderSystemHint();
     const info = await api('GET', '/api/info');
     $('api-url').textContent = info.api_url + '/v1';

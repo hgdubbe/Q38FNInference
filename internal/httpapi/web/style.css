@@ -80,3 +80,8 @@ a { color: var(--accent); }
 .msg.assistant { align-self: flex-start; background: var(--field); border: 1px solid var(--border); }
 .msg .think { color: var(--muted); font-size: 12px; border-left: 2px solid var(--border); padding-left: 8px; margin-bottom: 6px; }
 .msg.error { background: none; color: var(--danger); border: 1px solid var(--danger); }
+
+body.mode-single .only-ondemand, body.mode-ondemand .only-single { display: none; }
+.pill.loaded { background: var(--ok); color: #000; }
+.pill.sleeping { background: var(--border); }
+.pill.failed { background: var(--danger); color: #fff; }

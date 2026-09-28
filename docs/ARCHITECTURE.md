@@ -139,6 +139,27 @@ console window, child processes are started hidden, logs go to
 `launcher.log`, and starting a second copy just reopens the running
 instance's panel.
 
+## On-demand mode (llama-server router)
+
+In on-demand mode the launcher starts llama-server without a model, in
+llama.cpp's router mode, with `--models-max 1` and a generated
+`router-presets.ini` (in the config directory). Each INI section is one
+model: its id, its GGUF path and the same arguments single-model mode would
+use (offload plan, context, cache type, sampling, reasoning). Plans are
+computed once per model against the GPU memory measured when the router
+starts, before anything is loaded, which is what each model gets when only
+one is loaded at a time. The router loads a model on the first request that
+names it, evicting the previous one, and exposes load/unload/list endpoints.
+
+A background rescan (every 30 s, or on demand) rebuilds the INI from the
+local model folders plus any model the router lists from its own cache
+(e.g. downloaded through `POST /models`), which are given a plan under the
+router's own id; when the file changes the launcher calls
+`GET /models?reload=1`. The INI format has no quoting: values containing
+`;` or `#` can't be written, and such settings are skipped and reported.
+`--api-key` and `--sleep-idle-seconds` are passed to the router, which the
+model instances inherit.
+
 ## Known limitations / open questions
 
 - Nothing here has been run against real Qwen3.8-Flash-Next weights or real
