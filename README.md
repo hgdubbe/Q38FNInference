@@ -13,8 +13,10 @@ build of `ggml-org/llama.cpp`'s `llama-server`.
 - Common model settings: context, KV cache type, sampling (temperature,
   top-p/k, min-p, penalties, seed, max tokens), reasoning, threads, batch
   sizes, API key, extra llama-server arguments.
+- Reasoning level (off/low/medium/high), translated per model from its
+  chat template: on/off switches, effort levels, or a thinking-token budget.
 - System prompt override, applied to every chat request (default-only or
-  force-replace).
+  force-replace), with optional presets.
 - Chat tab for quick testing, llama.cpp's own web UI, and an OpenAI-compatible
   API at `http://127.0.0.1:8080/v1` (streaming and non-streaming; the
   Anthropic-style `/v1/messages` works too).
@@ -26,6 +28,8 @@ Get `Q38FNInference-windows-x64-cuda12.zip` from the
 it, and run `q38fninference.exe`. It needs an NVIDIA driver that supports
 CUDA 12.4 (R550 or newer). Running the exe again while it's open just
 reopens the control panel; **Quit** (top right) stops the model and exits.
+Closing all panel tabs does the same after 15 seconds, unless "keep running"
+is ticked in Settings (to keep serving the API).
 
 Settings and `launcher.log` live in `%APPDATA%\Q38FNInference`; downloaded
 models go to `%APPDATA%\Q38FNInference\models`.
