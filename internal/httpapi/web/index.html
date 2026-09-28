@@ -147,12 +147,20 @@
             <option value="">auto</option><option>on</option><option>off</option>
           </select>
         </label>
+        <label>Reasoning budget (tokens) <input name="model.reasoning_budget" type="number" min="0" placeholder="unlimited"></label>
+        <label>Reasoning effort
+          <select name="model.reasoning_effort">
+            <option value="">template default</option><option>minimal</option><option>low</option><option>medium</option><option>high</option>
+          </select>
+        </label>
         <label>CPU threads <input name="model.threads" type="number" min="0" placeholder="auto"></label>
         <label>Batch size <input name="model.batch_size" type="number" min="0" placeholder="2048"></label>
         <label>Micro-batch size <input name="model.ubatch_size" type="number" min="0" placeholder="512"></label>
         <label>Model alias <input name="model.alias" placeholder="model file name"></label>
         <label>API key <input name="model.api_key" type="password" placeholder="none"></label>
       </div>
+      <label class="block">Message when the reasoning budget runs out <input name="model.reasoning_budget_message" class="wide" placeholder="none, e.g. Time is up, give the final answer now."></label>
+      <p class="hint">The budget is a hard cap on thinking tokens (0 = answer immediately) and works with any model. Effort only matters if the model's chat template reads it. API clients can override the budget per request with <code>reasoning_budget_tokens</code>.</p>
       <label class="block">Extra llama-server arguments <input name="model.extra_args" class="wide" placeholder="--mlock --no-mmap"></label>
     </div>
 

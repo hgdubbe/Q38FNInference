@@ -79,7 +79,7 @@ document.querySelectorAll('.tab-btn').forEach((b) => b.addEventListener('click',
 const form = $('settings-form');
 const numberFields = new Set(['port', 'model.ctx_size', 'model.parallel', 'model.threads', 'model.batch_size',
   'model.ubatch_size', 'model.temperature', 'model.top_p', 'model.top_k', 'model.min_p', 'model.repeat_penalty',
-  'model.presence_penalty', 'model.max_tokens', 'model.seed']);
+  'model.presence_penalty', 'model.max_tokens', 'model.seed', 'model.reasoning_budget']);
 
 function getPath(obj, path) {
   return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);

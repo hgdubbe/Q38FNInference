@@ -64,9 +64,13 @@ type ModelSettings struct {
 	Seed            *int64   `json:"seed,omitempty"`
 
 	Reasoning string `json:"reasoning,omitempty"` // "", "on", "off", "auto"
-	APIKey    string `json:"api_key,omitempty"`
-	Alias     string `json:"alias,omitempty"`
-	ExtraArgs string `json:"extra_args,omitempty"` // whitespace-separated, appended last
+	// ReasoningBudget caps thinking tokens (0 = answer immediately); nil = unlimited
+	ReasoningBudget        *int   `json:"reasoning_budget,omitempty"`
+	ReasoningBudgetMessage string `json:"reasoning_budget_message,omitempty"`
+	ReasoningEffort        string `json:"reasoning_effort,omitempty"` // only if the chat template uses it
+	APIKey                 string `json:"api_key,omitempty"`
+	Alias                  string `json:"alias,omitempty"`
+	ExtraArgs              string `json:"extra_args,omitempty"` // whitespace-separated, appended last
 }
 
 // Args renders the non-offload llama-server flags for these settings.
@@ -101,6 +105,15 @@ func (s ModelSettings) Args() []string {
 	}
 	if s.Reasoning != "" {
 		a = append(a, "--reasoning", s.Reasoning)
+	}
+	if s.ReasoningBudget != nil {
+		a = append(a, "--reasoning-budget", strconv.Itoa(*s.ReasoningBudget))
+	}
+	if s.ReasoningBudgetMessage != "" {
+		a = append(a, "--reasoning-budget-message", s.ReasoningBudgetMessage)
+	}
+	if s.ReasoningEffort != "" {
+		a = append(a, "--reasoning-effort", s.ReasoningEffort)
 	}
 	if s.APIKey != "" {
 		a = append(a, "--api-key", s.APIKey)
