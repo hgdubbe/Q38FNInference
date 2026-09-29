@@ -62,7 +62,8 @@ type Server struct {
 	notice   string // see statusResponse.Notice
 	noticeID int
 
-	current *launchInfo // the single-model load that is running, for plans made meanwhile
+	current    *launchInfo // the single-model load that is running, for plans made meanwhile
+	expertLive string      // live expert-usage run file of the running model, if it records
 
 	// open control-panel tabs, counted by their log-stream connections
 	panels     int
@@ -636,11 +637,12 @@ func (s *Server) launch(modelPath string, args []string, devices []int, auto, re
 
 	ms := cfg.ModelFor(modelName(modelPath))
 	env := append([]string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}, ms.Env()...)
+	live := ""
 	if ms.ExpertStats {
-		if e, err := expertStatsEnv(modelPath, args); err != nil {
+		if e, run, err := expertStatsEnv(modelPath, args); err != nil {
 			log.Printf("httpapi: expert usage recording: %v", err)
 		} else {
-			env = append(env, e)
+			env, live = append(env, e), run
 		}
 	}
 	if len(devices) > 0 {
@@ -665,6 +667,7 @@ func (s *Server) launch(modelPath string, args []string, devices []int, auto, re
 
 	s.mu.Lock()
 	s.current = &li
+	s.expertLive = live
 	s.mu.Unlock()
 	s.llama.Note("starting llama-server")
 	if err := s.llama.Start(bin, args, env...); err != nil {

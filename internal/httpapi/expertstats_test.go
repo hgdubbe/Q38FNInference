@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -49,7 +50,7 @@ func TestExpertProfilesMatchLatestSession(t *testing.T) {
 	run("chat", "run-3", "[30,20,60,890]")
 	os.WriteFile(filepath.Join(dir, "active"), []byte("chat"), 0o644)
 
-	r, err := expertStats(dir)
+	r, err := expertStats(dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,5 +65,43 @@ func TestMigrateExpertStats(t *testing.T) {
 	migrateExpertStats(dir)
 	if _, err := os.Stat(filepath.Join(dir, defaultExpertProfile, "run-1.json")); err != nil {
 		t.Fatal("run file not moved into the default profile")
+	}
+}
+
+func TestLiveRunSplitsAtProfileSwitch(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(liveDir(dir), "run-9.json")
+	os.MkdirAll(liveDir(dir), 0o755)
+	write := func(gen string, tokens int) {
+		body := `{"n_expert":2,"gen_tokens":` + strconv.Itoa(tokens) + `,"prompt_tokens":0,"layers":[{"layer":0,"gen":` + gen + `,"prompt":[0,0]}]}`
+		if err := os.WriteFile(live, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSegments(live, []expertSegment{{Profile: "default"}})
+	write("[10,0]", 10)
+	if err := switchLiveProfile(live, "coding"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "active"), []byte("coding"), 0o644)
+	write("[10,6]", 16) // 6 more tokens, all to expert 1, after the switch
+
+	r, err := expertStats(dir, live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Profile != "coding" || r.GenTokens != 6 {
+		t.Fatalf("active profile while running: %+v", r)
+	}
+
+	finalizeLiveRuns(dir, "") // the model stopped
+	for profile, want := range map[string]uint64{"default": 10, "coding": 6} {
+		c := loadExpertCounts(filepath.Join(dir, profile), "")
+		if c.genTokens != want || c.runs != 1 {
+			t.Errorf("%s: %d tokens in %d runs, want %d in 1", profile, c.genTokens, c.runs, want)
+		}
+	}
+	if left, _ := filepath.Glob(filepath.Join(liveDir(dir), "*")); len(left) != 0 {
+		t.Errorf("live files left: %v", left)
 	}
 }

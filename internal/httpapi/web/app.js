@@ -1017,9 +1017,11 @@ async function loadExpertStats() {
     suggest.appendChild(button(`Record into "${s.best}"`, () => setExpertProfile(s.best), 'btn-secondary btn-sm'));
   }
   if (!s.runs) {
-    out.replaceChildren(...[suggest, callout(ms.expert_stats
-      ? 'Nothing recorded in this profile yet. Recording goes here from the next start of the model.'
-      : 'Nothing recorded in this profile. Turn on "Record expert usage" in Settings to fill it.', 'info')].filter(Boolean));
+    out.replaceChildren(...[suggest, callout(s.live
+      ? 'Recording into this profile now. Use the model as usual; the numbers appear as tokens come in.'
+      : ms.expert_stats
+        ? 'Nothing recorded in this profile yet. Recording starts when the model is started.'
+        : 'Nothing recorded in this profile. Turn on "Record expert usage" in Settings (then restart the model) to fill it.', 'info')].filter(Boolean));
     return;
   }
   const ram = s.ram_layers > 0;
@@ -1051,7 +1053,6 @@ async function setExpertProfile(name) {
   if (!state.model) return;
   try {
     await api('POST', '/api/expert-stats', { model: state.model.path, profile: name });
-    if (state.status && state.status.Running) toast(`Recording switches to "${name}" at the next start.`, 'ok', 3000);
   } catch (e) { toast(e.message, 'error'); }
   loadExpertStats();
 }

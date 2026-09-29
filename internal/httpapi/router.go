@@ -55,6 +55,9 @@ type routerRun struct {
 func (s *Server) setRouter(rt *routerRun) {
 	s.mu.Lock()
 	s.router = rt
+	if rt != nil {
+		s.expertLive = "" // the router doesn't record
+	}
 	s.mu.Unlock()
 }
 

@@ -29,6 +29,11 @@ const defaultExpertProfile = "default"
 
 var profileNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$`)
 
+// validProfileName: "live" holds the running model's counts (see liveDir).
+func validProfileName(name string) bool {
+	return profileNameRe.MatchString(name) && !strings.EqualFold(name, "live")
+}
+
 type expertRun struct {
 	NExpert      int    `json:"n_expert"`
 	GenTokens    uint64 `json:"gen_tokens"`
@@ -58,7 +63,7 @@ func expertModelDir(modelPath string) (string, error) {
 
 func activeExpertProfile(modelDir string) string {
 	b, err := os.ReadFile(filepath.Join(modelDir, "active"))
-	if name := strings.TrimSpace(string(b)); err == nil && profileNameRe.MatchString(name) {
+	if name := strings.TrimSpace(string(b)); err == nil && validProfileName(name) {
 		return name
 	}
 	return defaultExpertProfile
@@ -68,30 +73,205 @@ func expertProfiles(modelDir string) []string {
 	entries, _ := os.ReadDir(modelDir)
 	names := []string{}
 	for _, e := range entries {
-		if e.IsDir() && profileNameRe.MatchString(e.Name()) {
+		if e.IsDir() && validProfileName(e.Name()) {
 			names = append(names, e.Name())
 		}
 	}
 	return names
 }
 
-// expertStatsEnv prepares a new run file in the active profile for a launch
-// and returns the environment variable pointing llama-server at it.
-func expertStatsEnv(modelPath string, args []string) (string, error) {
+// A running model writes its counts into live/run-<time>.json, cumulative
+// since its start. live/run-<time>.seg lists which profile each stretch of
+// that run belongs to, with the counts at the moment it began, so switching
+// profile takes effect at once. Once the model has stopped, the run is
+// split into one finished run per stretch, in that stretch's profile.
+type expertSegment struct {
+	Profile string     `json:"profile"`        // "" once cleared
+	Base    *expertRun `json:"base,omitempty"` // counts when the stretch began; nil = zero
+}
+
+func liveDir(modelDir string) string { return filepath.Join(modelDir, "live") }
+
+func segPath(run string) string { return strings.TrimSuffix(run, ".json") + ".seg" }
+
+func readSegments(run string) []expertSegment {
+	var segs []expertSegment
+	b, err := os.ReadFile(segPath(run))
+	if err == nil {
+		json.Unmarshal(b, &segs)
+	}
+	return segs
+}
+
+func writeSegments(run string, segs []expertSegment) error {
+	b, _ := json.Marshal(segs)
+	return os.WriteFile(segPath(run), b, 0o644)
+}
+
+// expertStatsEnv starts a live run for a launch in the active profile and
+// returns the environment variable pointing llama-server at it, and its path.
+func expertStatsEnv(modelPath string, args []string) (string, string, error) {
 	modelDir, err := expertModelDir(modelPath)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	dir := filepath.Join(modelDir, activeExpertProfile(modelDir))
+	migrateExpertStats(modelDir)
+	finalizeLiveRuns(modelDir, "")
+	dir := liveDir(modelDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+		return "", "", err
 	}
-	base := filepath.Join(dir, "run-"+strconv.FormatInt(time.Now().UnixNano(), 10))
+	run := filepath.Join(dir, "run-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".json")
 	meta, _ := json.Marshal(expertRunMeta{RAMLayers: ramExpertLayers(modelPath, args)})
-	if err := os.WriteFile(base+".meta", meta, 0o644); err != nil {
-		return "", err
+	if err := os.WriteFile(strings.TrimSuffix(run, ".json")+".meta", meta, 0o644); err != nil {
+		return "", "", err
 	}
-	return "LLAMA_EXPERT_STATS=" + base + ".json", nil
+	if err := writeSegments(run, []expertSegment{{Profile: activeExpertProfile(modelDir)}}); err != nil {
+		return "", "", err
+	}
+	return "LLAMA_EXPERT_STATS=" + run, run, nil
+}
+
+// subRuns returns a - b, per layer and expert (b nil: a itself).
+func subRuns(a expertRun, b *expertRun) expertRun {
+	if b == nil {
+		return a
+	}
+	out := expertRun{NExpert: a.NExpert, GenTokens: a.GenTokens - min(a.GenTokens, b.GenTokens), PromptTokens: a.PromptTokens - min(a.PromptTokens, b.PromptTokens)}
+	base := map[int]int{}
+	for i, l := range b.Layers {
+		base[l.Layer] = i
+	}
+	sub := func(x []uint64, y []uint64) []uint64 {
+		r := make([]uint64, len(x))
+		for i := range x {
+			r[i] = x[i]
+			if i < len(y) {
+				r[i] -= min(x[i], y[i])
+			}
+		}
+		return r
+	}
+	out.Layers = make([]struct {
+		Layer  int      `json:"layer"`
+		Gen    []uint64 `json:"gen"`
+		Prompt []uint64 `json:"prompt"`
+	}, len(a.Layers))
+	for i, l := range a.Layers {
+		out.Layers[i].Layer = l.Layer
+		out.Layers[i].Gen, out.Layers[i].Prompt = l.Gen, l.Prompt
+		if j, ok := base[l.Layer]; ok {
+			out.Layers[i].Gen = sub(l.Gen, b.Layers[j].Gen)
+			out.Layers[i].Prompt = sub(l.Prompt, b.Layers[j].Prompt)
+		}
+	}
+	return out
+}
+
+// liveStretch is one stretch of a live run, as counts of its own.
+type liveStretch struct {
+	profile string
+	counts  expertRun
+	last    bool // the stretch still being recorded
+}
+
+// liveStretches splits a live run into its stretches.
+func liveStretches(run string) []liveStretch {
+	cur, ok := readExpertRun(run)
+	if !ok {
+		return nil
+	}
+	segs := readSegments(run)
+	var out []liveStretch
+	for i, sg := range segs {
+		end := cur
+		if i+1 < len(segs) && segs[i+1].Base != nil {
+			end = *segs[i+1].Base
+		}
+		out = append(out, liveStretch{profile: sg.Profile, counts: subRuns(end, sg.Base), last: i == len(segs)-1})
+	}
+	return out
+}
+
+// finalizeLiveRuns turns every live run except running (still being
+// written) into finished runs in the profiles its stretches belong to.
+func finalizeLiveRuns(modelDir, running string) {
+	runs, _ := filepath.Glob(filepath.Join(liveDir(modelDir), "run-*.json"))
+	segs, _ := filepath.Glob(filepath.Join(liveDir(modelDir), "run-*.seg"))
+	for _, sg := range segs { // a run that never wrote counts
+		if r := strings.TrimSuffix(sg, ".seg") + ".json"; !contains(runs, r) {
+			runs = append(runs, r)
+		}
+	}
+	for _, run := range runs {
+		if run == running {
+			continue
+		}
+		base := strings.TrimSuffix(run, ".json")
+		meta, _ := os.ReadFile(base + ".meta")
+		for i, st := range liveStretches(run) {
+			if st.profile == "" || st.counts.GenTokens+st.counts.PromptTokens == 0 {
+				continue
+			}
+			dir := filepath.Join(modelDir, st.profile)
+			if os.MkdirAll(dir, 0o755) != nil {
+				continue
+			}
+			name := filepath.Join(dir, filepath.Base(base)+"-"+strconv.Itoa(i))
+			b, _ := json.Marshal(st.counts)
+			if os.WriteFile(name+".json", b, 0o644) == nil && meta != nil {
+				os.WriteFile(name+".meta", meta, 0o644)
+			}
+		}
+		for _, ext := range []string{".json", ".json.tmp", ".meta", ".seg"} {
+			os.Remove(base + ext)
+		}
+	}
+}
+
+// liveCounts returns the running run's current counts, if it has any.
+func liveCounts(running string) (*expertRun, bool) {
+	if running == "" {
+		return nil, false
+	}
+	cur, ok := readExpertRun(running)
+	if !ok {
+		return nil, true // started, nothing counted yet
+	}
+	return &cur, true
+}
+
+// switchLiveProfile starts a new stretch of the running run in profile.
+func switchLiveProfile(running, profile string) error {
+	cur, ok := liveCounts(running)
+	if !ok {
+		return nil
+	}
+	segs := readSegments(running)
+	if len(segs) > 0 && segs[len(segs)-1].Profile == profile {
+		return nil
+	}
+	return writeSegments(running, append(segs, expertSegment{Profile: profile, Base: cur}))
+}
+
+// clearLiveProfile drops the running run's stretches in profile, and
+// restarts the current stretch from now if it was one of them.
+func clearLiveProfile(running, profile string) error {
+	cur, ok := liveCounts(running)
+	if !ok {
+		return nil
+	}
+	segs := readSegments(running)
+	current := len(segs) > 0 && segs[len(segs)-1].Profile == profile
+	for i := range segs {
+		if segs[i].Profile == profile {
+			segs[i].Profile = ""
+		}
+	}
+	if current {
+		segs = append(segs, expertSegment{Profile: profile, Base: cur})
+	}
+	return writeSegments(running, segs)
 }
 
 // ramExpertLayers counts the blocks whose experts a command line leaves in
@@ -233,10 +413,13 @@ func readExpertRun(path string) (expertRun, bool) {
 
 // summarizeExpertStats sums every run file in a profile folder.
 func summarizeExpertStats(dir string) (expertSummary, error) {
-	c := loadExpertCounts(dir, "")
+	return summarizeCounts(loadExpertCounts(dir, "")), nil
+}
+
+func summarizeCounts(c *expertCounts) expertSummary {
 	sum := expertSummary{Runs: c.runs, GenTokens: c.genTokens, PromptTokens: c.promptTokens, NExpert: c.nExpert, RAMLayers: c.ramLayers}
-	if c.runs == 0 {
-		return sum, nil
+	if c.runs == 0 || c.genTokens+c.promptTokens == 0 {
+		return sum
 	}
 	counts, src := c.routing()
 	sum.Source = src
@@ -247,7 +430,7 @@ func summarizeExpertStats(dir string) (expertSummary, error) {
 		cv.RAM, _ = meanCoverage(counts, share, func(l int) bool { return l < c.ramLayers })
 		sum.Coverage = append(sum.Coverage, cv)
 	}
-	return sum, nil
+	return sum
 }
 
 func meanCoverage(counts map[int][]uint64, share float64, use func(layer int) bool) (float64, int) {
@@ -327,53 +510,89 @@ type expertStatsResponse struct {
 	// Best is the profile the latest session's routing resembles most,
 	// when there are at least two to compare.
 	Best string `json:"best,omitempty"`
+	Live bool   `json:"live"` // the model is running and recording
 }
 
 // expertStats reports the active profile's summary, every profile, and how
-// well each matches the latest session in the active profile.
-func expertStats(modelDir string) (expertStatsResponse, error) {
+// well each matches the latest session. running is the live run file of the
+// model now running, if any.
+func expertStats(modelDir, running string) (expertStatsResponse, error) {
 	active := activeExpertProfile(modelDir)
-	sum, err := summarizeExpertStats(filepath.Join(modelDir, active))
-	if err != nil {
-		return expertStatsResponse{}, err
+	var stretches []liveStretch
+	var liveMeta expertRunMeta
+	if running != "" {
+		stretches = liveStretches(running)
+		if b, err := os.ReadFile(strings.TrimSuffix(running, ".json") + ".meta"); err == nil {
+			json.Unmarshal(b, &liveMeta)
+		}
 	}
-	resp := expertStatsResponse{expertSummary: sum, Profile: active}
 
+	// the latest session: the stretch being recorded, or else the active
+	// profile's newest finished run; it isn't compared with itself
 	var latest map[int][]uint64
-	var latestFile string
-	cur := loadExpertCounts(filepath.Join(modelDir, active), "")
-	if cur.newest != "" {
-		if r, ok := readExpertRun(filepath.Join(modelDir, active, cur.newest)); ok {
+	skipFile, skipLive := "", false
+	if n := len(stretches); n > 0 && stretches[n-1].profile == active {
+		if r := stretches[n-1].counts; r.GenTokens+r.PromptTokens >= minMatchTokens {
 			one := newExpertCounts()
 			one.add(r)
-			if r.GenTokens+r.PromptTokens >= minMatchTokens {
+			latest, _ = one.routing()
+			skipLive = true
+		}
+	}
+	if latest == nil {
+		if c := loadExpertCounts(filepath.Join(modelDir, active), ""); c.newest != "" {
+			if r, ok := readExpertRun(filepath.Join(modelDir, active, c.newest)); ok && r.GenTokens+r.PromptTokens >= minMatchTokens {
+				one := newExpertCounts()
+				one.add(r)
 				latest, _ = one.routing()
-				latestFile = cur.newest
+				skipFile = c.newest
 			}
 		}
 	}
 
+	// a profile's counts: its finished runs plus its stretches of the live run
+	counts := func(name string, forMatch bool) *expertCounts {
+		skip := ""
+		if forMatch && name == active {
+			skip = skipFile
+		}
+		c := loadExpertCounts(filepath.Join(modelDir, name), skip)
+		for _, st := range stretches {
+			if st.profile != name || st.counts.NExpert == 0 || (c.nExpert != 0 && st.counts.NExpert != c.nExpert) {
+				continue
+			}
+			if forMatch && st.last && skipLive {
+				continue
+			}
+			c.add(st.counts)
+			c.ramLayers = liveMeta.RAMLayers
+		}
+		return c
+	}
+
+	resp := expertStatsResponse{expertSummary: summarizeCounts(counts(active, false)), Profile: active}
 	names := expertProfiles(modelDir)
-	if !contains(names, active) {
-		names = append(names, active)
+	extra := []string{active}
+	for _, st := range stretches {
+		extra = append(extra, st.profile) // may have no finished runs yet
+	}
+	for _, n := range extra {
+		if n != "" && !contains(names, n) {
+			names = append(names, n)
+		}
 	}
 	sort.Strings(names)
 	withData := 0
 	for _, name := range names {
-		c := loadExpertCounts(filepath.Join(modelDir, name), "")
+		c := counts(name, false)
 		info := expertProfileInfo{Name: name, Runs: c.runs, Tokens: c.genTokens}
-		if c.runs > 0 {
+		if c.genTokens+c.promptTokens > 0 {
 			withData++
 		}
 		if latest != nil {
-			// the latest session itself doesn't count towards its own profile
-			other := c
-			if name == active {
-				other = loadExpertCounts(filepath.Join(modelDir, name), latestFile)
-			}
-			if other.runs > 0 {
-				counts, _ := other.routing()
-				info.Match = routingSimilarity(latest, counts)
+			if m := counts(name, true); m.genTokens+m.promptTokens > 0 {
+				r, _ := m.routing()
+				info.Match = routingSimilarity(latest, r)
 			}
 		}
 		resp.Profiles = append(resp.Profiles, info)
@@ -414,6 +633,17 @@ func migrateExpertStats(modelDir string) {
 	}
 }
 
+// expertLiveRun is the live run file of the model now running, if it records.
+func (s *Server) expertLiveRun() string {
+	s.mu.Lock()
+	run := s.expertLive
+	s.mu.Unlock()
+	if run == "" || !s.llama.Status().Running {
+		return ""
+	}
+	return run
+}
+
 // GET    /api/expert-stats?model=<path>            summary, profiles, best match
 // POST   /api/expert-stats {model, profile}        make profile active (created if new)
 // DELETE /api/expert-stats?model=<path>&profile=n  delete a profile's runs
@@ -434,8 +664,8 @@ func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("model is required"))
 		return
 	}
-	if req.Profile != "" && !profileNameRe.MatchString(req.Profile) {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("profile names are 1-40 letters, digits, spaces, '.', '_' or '-'"))
+	if req.Profile != "" && !validProfileName(req.Profile) {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("profile names are 1-40 letters, digits, spaces, '.', '_' or '-', and not \"live\""))
 		return
 	}
 	modelDir, err := expertModelDir(req.Model)
@@ -444,6 +674,11 @@ func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	migrateExpertStats(modelDir)
+	running := s.expertLiveRun()
+	if running != "" && filepath.Dir(filepath.Dir(running)) != modelDir {
+		running = "" // another model is running
+	}
+	finalizeLiveRuns(modelDir, running)
 
 	switch r.Method {
 	case http.MethodPost:
@@ -451,8 +686,12 @@ func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, fmt.Errorf("profile is required"))
 			return
 		}
-		if err := os.MkdirAll(filepath.Join(modelDir, req.Profile), 0o755); err == nil {
+		err := os.MkdirAll(filepath.Join(modelDir, req.Profile), 0o755)
+		if err == nil {
 			err = os.WriteFile(filepath.Join(modelDir, "active"), []byte(req.Profile), 0o644)
+		}
+		if err == nil {
+			err = switchLiveProfile(running, req.Profile)
 		}
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
@@ -463,7 +702,6 @@ func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 		if profile == "" {
 			profile = activeExpertProfile(modelDir)
 		}
-		// files only: a running model keeps writing its run into the folder
 		files, _ := filepath.Glob(filepath.Join(modelDir, profile, "run-*"))
 		for _, f := range files {
 			if err := os.Remove(f); err != nil {
@@ -471,14 +709,19 @@ func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if err := clearLiveProfile(running, profile); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
 		if profile != activeExpertProfile(modelDir) {
 			os.Remove(filepath.Join(modelDir, profile)) // gone from the list once empty
 		}
 	}
-	resp, err := expertStats(modelDir)
+	resp, err := expertStats(modelDir, running)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	resp.Live = running != ""
 	writeJSON(w, resp)
 }

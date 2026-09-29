@@ -383,11 +383,15 @@ sync per batch and the lost CUDA top-k fusion, only while enabled.
 
 The launcher sets it with the "Record expert usage" model setting (one-model
 mode; in router mode every model would share one file): each launch writes
-`expert-stats/<model id>/<profile>/run-<time>.json` in the config
-directory, plus a `.meta` file with how many blocks kept their experts in
-RAM under that launch's plan. Profiles (named on the Run page, the active
-one in `expert-stats/<model id>/active`) keep workloads apart, since coding
-and chat may route differently. The latest session's routing is compared
+`expert-stats/<model id>/live/run-<time>.json` in the config directory,
+plus a `.meta` file with how many blocks kept their experts in RAM under
+that launch's plan. Profiles (named on the Run page, the active one in
+`expert-stats/<model id>/active`) keep workloads apart, since coding and
+chat may route differently. Switching profile takes effect at once: a
+`.seg` file next to the live run records which profile each stretch of it
+belongs to and the counts when the stretch began, and once the model has
+stopped the run is split into one finished run per stretch, in
+`expert-stats/<model id>/<profile>/`. The latest session's routing is compared
 with every profile (per-layer cosine similarity of the expert counts,
 averaged) and the closest one is suggested; a later hot-expert placement can
 use the same match to pick its profile. The Run page sums a profile's runs
