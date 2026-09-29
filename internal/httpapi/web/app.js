@@ -734,6 +734,7 @@ async function computeTune() {
     if (seq !== tuneSeq) return;
     state.plan = resp;
     $('tune-args').value = joinArgs(resp.args);
+    state.argsEdited = false;
     renderPlan();
     renderGPUs();
   } catch (e) {
@@ -743,6 +744,7 @@ async function computeTune() {
   }
 }
 $('retune').addEventListener('click', computeTune);
+$('tune-args').addEventListener('input', () => { state.argsEdited = true; });
 
 function renderPlan() {
   const out = $('plan');
@@ -824,7 +826,8 @@ $('start-server').addEventListener('click', async () => {
     } else {
       await api('POST', '/api/server/start', {
         model_path: state.model.path,
-        args: splitArgs($('tune-args').value),
+        // unedited: the server re-plans at start, with the VRAM that is free then
+        args: state.argsEdited ? splitArgs($('tune-args').value) : undefined,
         devices: state.plan ? state.plan.plan.Devices : [],
       });
     }
@@ -868,6 +871,9 @@ async function refreshServerStatus() {
     toast(st.OnDemand ? 'Server ready. Models load on first request.' : 'Model loaded and ready.', 'ok');
   }
   state.wasReady = st.Running && st.Ready;
+  // things the launcher did on its own (e.g. re-planned after a VRAM overflow)
+  if (st.NoticeID && state.noticeSeen !== undefined && st.NoticeID !== state.noticeSeen) toast(st.Notice, 'warn', 15000);
+  state.noticeSeen = st.NoticeID || 0;
   if (st.OnDemand && st.Ready) refreshRouterModels();
   renderHero();
 }

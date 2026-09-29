@@ -301,6 +301,22 @@ Changed:
   depending on the backend's tie-breaking). CUDA's sparse flash attention
   keeps at most `n_kv_max` visible cells per row; the bound passed allows
   one block more than a contiguous context needs.
+- **Plans can't go stale or silently overflow VRAM.** Three fixes after a
+  report of generation dropping from ~10 to ~4 t/s:
+  - A plan made while a model is running adds that model's own GPU memory
+    back (from llama-server's logged buffer sizes); before, opening the
+    panel with a model loaded planned everything onto the CPU, and Start
+    then launched that plan.
+  - Start re-plans with the memory free at that moment unless the command
+    line was edited by hand.
+  - After each load the launcher compares llama-server's per-GPU buffers
+    with what the GPU had free. On Windows an overshoot doesn't fail, it
+    spills into shared system memory at a fraction of the speed, so the
+    overshoot is saved per model and GPU (`vram_corrections` in the
+    config), the model is restarted once with the corrected plan, and later
+    plans keep that memory free. Plans also keep 4% of each card free, and
+    every plan that leaves weights in RAM lists each GPU's budget
+    (free − context − compute − staging − sparse attention − safety).
 - **RAM check.** The plan warns when the weights kept in RAM exceed physical
   memory (they are memory-mapped and would be re-read from disk per token).
 - **Benchmark** (Run tab): a fixed ~1500-token prompt plus exactly 128

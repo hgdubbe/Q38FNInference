@@ -295,3 +295,27 @@ func TestArgsSingleGPU(t *testing.T) {
 		t.Errorf("single GPU args must not set --tensor-split: %v", args)
 	}
 }
+
+func TestExtraReserveAndMarginMoveExpertsOffGPU(t *testing.T) {
+	m := synthModel(8, 1*GiB, 10*MiB, 10*MiB)
+	free := overhead(true) + 4*GiB + 100*MiB
+	base, err := Compute(m, []GPU{{Index: 3, FreeBytes: free}}, Options{NoOpOffload: true, UBatch: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a learned 1 GiB correction for this GPU costs exactly one block's experts
+	corr, _ := Compute(m, []GPU{{Index: 3, FreeBytes: free}}, Options{NoOpOffload: true, UBatch: 512, ExtraReserve: map[int]uint64{3: 1 * GiB}})
+	if corr.NCPUMoE != base.NCPUMoE+1 {
+		t.Errorf("with correction ncmoe = %d, want %d", corr.NCPUMoE, base.NCPUMoE+1)
+	}
+	// corrections for another GPU don't apply
+	other, _ := Compute(m, []GPU{{Index: 3, FreeBytes: free}}, Options{NoOpOffload: true, UBatch: 512, ExtraReserve: map[int]uint64{0: 1 * GiB}})
+	if other.NCPUMoE != base.NCPUMoE {
+		t.Errorf("another GPU's correction changed the plan: ncmoe %d vs %d", other.NCPUMoE, base.NCPUMoE)
+	}
+	// the 4% margin: a 25 GiB card keeps 1 GiB more free
+	marg, _ := Compute(m, []GPU{{Index: 3, FreeBytes: free, TotalBytes: 25 * GiB}}, Options{NoOpOffload: true, UBatch: 512})
+	if marg.NCPUMoE != base.NCPUMoE+1 {
+		t.Errorf("with margin ncmoe = %d, want %d", marg.NCPUMoE, base.NCPUMoE+1)
+	}
+}

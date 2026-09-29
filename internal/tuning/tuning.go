@@ -87,6 +87,10 @@ type Options struct {
 	// weights are never copied to the GPU and need no staging VRAM.
 	NoOpOffload bool
 
+	// ExtraReserve is additional VRAM to keep free per GPU index, learned
+	// from earlier loads that used more than planned.
+	ExtraReserve map[int]uint64
+
 	// qsaCells is the context size when the QSA sparse path can run (the
 	// cache can outgrow the indexer budget), else 0; see qsaComputeBytes.
 	qsaCells uint64
@@ -334,6 +338,12 @@ func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 			fmt.Sprintf("GPU memory is too small for every block's non-expert weights: offloading the last %d of %d slots, all experts in CPU RAM", k, n+1),
 			"expect slow generation: most compute runs on CPU")
 	}
+	if !plan.FullyOnGPU {
+		// show where each GPU's memory went, so a thin plan explains itself
+		for _, g := range gpus {
+			plan.Notes = append(plan.Notes, budgetNote(g, gpus[0].Index == g.Index, opt, ub, staging))
+		}
+	}
 	if len(gpus) > 1 {
 		for d, c := range counts {
 			if c == 0 {
@@ -355,9 +365,41 @@ func deviceBudgets(gpus []GPU, opt Options, ub int, staging uint64) []int64 {
 			compute = computeMain(ub) + staging
 		}
 		compute += qsaComputeBytes(opt.qsaCells, ub)
+		// the estimates above are model-independent guesses; keep a margin
+		// that scales with the card, since overshooting VRAM on Windows
+		// doesn't fail but spills into shared memory at a fraction of the speed
+		compute += g.TotalBytes / 25
+		compute += opt.ExtraReserve[g.Index]
 		budgets[d] = int64(g.FreeBytes) - int64(cudaContextBytes+compute+opt.ReserveBytes)
 	}
 	return budgets
+}
+
+// budgetNote spells out deviceBudgets for one GPU.
+func budgetNote(g GPU, main bool, opt Options, ub int, staging uint64) string {
+	gib := func(b uint64) string { return fmt.Sprintf("%.1f", float64(b)/GiB) }
+	compute := uint64(computeOtherBytes)
+	if main {
+		compute = computeMain(ub)
+	}
+	out := fmt.Sprintf("%s: %s GiB free − %s CUDA context − %s compute", g.Name, gib(g.FreeBytes), gib(cudaContextBytes), gib(compute))
+	var used uint64 = cudaContextBytes + compute + opt.ReserveBytes
+	if main && staging > 0 {
+		out += " − " + gib(staging) + " prompt staging"
+		used += staging
+	}
+	if q := qsaComputeBytes(opt.qsaCells, ub); q > 0 {
+		out += fmt.Sprintf(" − %s sparse attention (%d-token context × %d micro-batch)", gib(q), opt.qsaCells, ub)
+		used += q
+	}
+	out += " − " + gib(opt.ReserveBytes+g.TotalBytes/25) + " safety"
+	used += g.TotalBytes / 25
+	if e := opt.ExtraReserve[g.Index]; e > 0 {
+		out += " − " + gib(e) + " learned from an earlier overflow"
+		used += e
+	}
+	left := int64(g.FreeBytes) - int64(used)
+	return out + fmt.Sprintf(" = %.1f GiB for model layers", float64(left)/GiB)
 }
 
 // stagingFor is the largest single block's worth of RAM-resident weights:

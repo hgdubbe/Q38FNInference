@@ -275,7 +275,7 @@ func (s *Server) startRouter(w http.ResponseWriter) {
 	rt.pid = st.PID
 	s.setRouter(rt)
 	s.Proxy.SetTarget(rt.target)
-	go s.watch(st.PID, rt.target)
+	go s.watch(st.PID, rt.target, nil)
 	go s.keepPresetsCurrent(rt)
 	writeJSON(w, st)
 }

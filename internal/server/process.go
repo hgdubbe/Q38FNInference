@@ -206,6 +206,11 @@ func (m *Manager) appendLogLocked(line string) {
 }
 
 // Logs returns a snapshot of recently captured output lines.
+// Note adds a launcher message to the log shown with llama-server's output.
+func (m *Manager) Note(msg string) {
+	m.appendLog("[launcher] " + msg)
+}
+
 func (m *Manager) Logs() []string {
 	m.logMu.Lock()
 	defer m.logMu.Unlock()

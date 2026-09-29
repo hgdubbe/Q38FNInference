@@ -59,6 +59,11 @@ type Server struct {
 
 	router *routerRun // set while llama-server runs in on-demand (router) mode
 
+	notice   string // see statusResponse.Notice
+	noticeID int
+
+	current *launchInfo // the single-model load that is running, for plans made meanwhile
+
 	// open control-panel tabs, counted by their log-stream connections
 	panels     int
 	panelSeen  bool
@@ -391,7 +396,38 @@ func (s *Server) tune(modelPath string) (*tuneResponse, error) {
 	if err != nil {
 		log.Printf("httpapi: GPU detection failed, planning CPU-only: %v", err)
 	}
-	return s.tuneWith(modelPath, gpus)
+	return s.tuneWith(modelPath, s.withOwnUsage(gpus))
+}
+
+// withOwnUsage adds back the VRAM our own running llama-server holds: a plan
+// made while a model is loaded is for the next start, when that memory is
+// free again. Without this, opening the panel with a model running planned
+// everything onto the CPU.
+func (s *Server) withOwnUsage(gpus []tuning.GPU) []tuning.GPU {
+	s.mu.Lock()
+	cur := s.current
+	s.mu.Unlock()
+	if cur == nil || !s.llama.Status().Running || s.currentRouter() != nil {
+		return gpus
+	}
+	used := cudaBufferBytes(loadLogs(s.llama.Logs()))
+	out := slices.Clone(gpus)
+	for ord, d := range cur.devices {
+		for i := range out {
+			if out[i].Index != d.Index {
+				continue
+			}
+			if u, ok := used[ord]; ok {
+				out[i].FreeBytes += u + cudaContextBytes
+			} else {
+				out[i].FreeBytes = d.FreeBytes // still loading: use what was free before it started
+			}
+			if out[i].TotalBytes > 0 && out[i].FreeBytes > out[i].TotalBytes {
+				out[i].FreeBytes = out[i].TotalBytes
+			}
+		}
+	}
+	return out
 }
 
 func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU) (*tuneResponse, error) {
@@ -401,6 +437,7 @@ func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU) (*tuneResponse, e
 	}
 	ms := s.Config().Model
 	plan, err := tuning.Compute(meta, gpus, tuning.Options{
+		ExtraReserve: s.extraReserve(modelPath, gpus),
 		RequestedCtx: ms.CtxSize,
 		Parallel:     ms.Parallel,
 		CacheType:    ms.CacheType,
@@ -532,51 +569,28 @@ func (s *Server) handleServerStart(w http.ResponseWriter, r *http.Request) {
 		s.startRouter(w)
 		return
 	}
-	if len(req.Args) == 0 {
-		if req.ModelPath == "" {
-			writeErr(w, http.StatusBadRequest, fmt.Errorf("model_path or args required"))
-			return
-		}
+	auto := false
+	if req.ModelPath != "" {
 		plan, err := s.tune(req.ModelPath)
-		if err != nil {
+		if err != nil && len(req.Args) == 0 {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		req.Args, req.Devices = plan.Args, plan.Plan.Devices
-	}
-
-	cfg := s.Config()
-	bin := appconfig.LocateLlamaServer(cfg)
-	if bin == "" {
-		writeErr(w, http.StatusPreconditionFailed, fmt.Errorf("llama-server not found: put it next to this app or set its path in Settings"))
-		return
-	}
-
-	port, err := freePort()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	args := append(stripFlags(req.Args, "--host", "--port"), "--host", "127.0.0.1", "--port", strconv.Itoa(port))
-
-	env := append([]string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}, cfg.Model.Env()...)
-	if len(req.Devices) > 0 {
-		ids := make([]string, len(req.Devices))
-		for i, d := range req.Devices {
-			ids[i] = strconv.Itoa(d)
+		if len(req.Args) == 0 {
+			req.Args, req.Devices = plan.Args, plan.Plan.Devices
 		}
-		env = append(env, "CUDA_VISIBLE_DEVICES="+strings.Join(ids, ","))
-	}
-
-	if err := s.llama.Start(bin, args, env...); err != nil {
-		writeErr(w, http.StatusConflict, err)
+		// unedited plan args can be re-planned if the load overshoots VRAM
+		auto = plan != nil && slices.Equal(stripFlags(plan.Args, "--host", "--port"), stripFlags(req.Args, "--host", "--port"))
+	} else if len(req.Args) == 0 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("model_path or args required"))
 		return
 	}
-	st := s.llama.Status()
-	target := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
-	s.setRouter(nil)
-	s.Proxy.SetTarget(target)
-	go s.watch(st.PID, target)
+
+	st, err := s.launch(req.ModelPath, req.Args, req.Devices, auto, false)
+	if err != nil {
+		writeErr(w, err.(httpError).status, err)
+		return
+	}
 
 	if req.ModelPath != "" {
 		s.mu.Lock()
@@ -590,9 +604,67 @@ func (s *Server) handleServerStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, st)
 }
 
+type httpError struct {
+	status int
+	err    error
+}
+
+func (e httpError) Error() string { return e.err.Error() }
+
+// launch starts llama-server for one model and watches it until ready,
+// then checks its GPU memory use (see vramcheck.go).
+func (s *Server) launch(modelPath string, args []string, devices []int, auto, recheck bool) (server.Status, error) {
+	cfg := s.Config()
+	bin := appconfig.LocateLlamaServer(cfg)
+	if bin == "" {
+		return server.Status{}, httpError{http.StatusPreconditionFailed, fmt.Errorf("llama-server not found: put it next to this app or set its path in Settings")}
+	}
+
+	port, err := freePort()
+	if err != nil {
+		return server.Status{}, httpError{http.StatusInternalServerError, err}
+	}
+	args = append(stripFlags(args, "--host", "--port"), "--host", "127.0.0.1", "--port", strconv.Itoa(port))
+
+	env := append([]string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}, cfg.Model.Env()...)
+	if len(devices) > 0 {
+		ids := make([]string, len(devices))
+		for i, d := range devices {
+			ids[i] = strconv.Itoa(d)
+		}
+		env = append(env, "CUDA_VISIBLE_DEVICES="+strings.Join(ids, ","))
+	}
+
+	// free memory per GPU just before the load, in CUDA ordinal order
+	li := launchInfo{modelPath: modelPath, auto: auto, recheck: recheck}
+	if all, err := gpu.Detect(); err == nil {
+		for _, d := range devices {
+			for _, g := range all {
+				if g.Index == d {
+					li.devices = append(li.devices, g)
+				}
+			}
+		}
+	}
+
+	s.mu.Lock()
+	s.current = &li
+	s.mu.Unlock()
+	s.llama.Note("starting llama-server")
+	if err := s.llama.Start(bin, args, env...); err != nil {
+		return server.Status{}, httpError{http.StatusConflict, err}
+	}
+	st := s.llama.Status()
+	target := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
+	s.setRouter(nil)
+	s.Proxy.SetTarget(target)
+	go s.watch(st.PID, target, &li)
+	return st, nil
+}
+
 // watch marks the server ready once /health answers, and detaches the proxy
 // when that process exits.
-func (s *Server) watch(pid int, target *url.URL) {
+func (s *Server) watch(pid int, target *url.URL, li *launchInfo) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	ready := false
 	for {
@@ -608,6 +680,9 @@ func (s *Server) watch(pid int, target *url.URL) {
 				resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
 					ready = true
+					if li != nil && len(li.devices) > 0 && s.checkVRAM(pid, *li) {
+						return // replaced by a corrected load
+					}
 					s.llama.MarkReady(pid)
 					if s.Config().OpenChatOnReady && s.hooks.OpenURL != nil {
 						s.hooks.OpenURL(s.apiURL() + "/")
@@ -657,11 +732,18 @@ func (s *Server) handleServerStop(w http.ResponseWriter, r *http.Request) {
 type statusResponse struct {
 	server.Status
 	OnDemand bool `json:"OnDemand"`
+	// Notice is the latest thing the launcher did on its own (e.g. a VRAM
+	// re-plan); NoticeID changes with each one so the panel shows it once.
+	Notice   string `json:"Notice,omitempty"`
+	NoticeID int    `json:"NoticeID,omitempty"`
 }
 
 func (s *Server) status() statusResponse {
 	st := s.llama.Status()
-	return statusResponse{Status: st, OnDemand: st.Running && s.currentRouter() != nil}
+	s.mu.Lock()
+	notice, id := s.notice, s.noticeID
+	s.mu.Unlock()
+	return statusResponse{Status: st, OnDemand: st.Running && s.currentRouter() != nil, Notice: notice, NoticeID: id}
 }
 
 func (s *Server) handleServerStatus(w http.ResponseWriter, r *http.Request) {

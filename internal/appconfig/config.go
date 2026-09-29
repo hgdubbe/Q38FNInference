@@ -33,6 +33,11 @@ type Config struct {
 	// GPUs lists the nvidia-smi indices to use; empty means all of them.
 	GPUs []int `json:"gpus,omitempty"`
 
+	// VRAMCorrections is extra VRAM, in bytes, the planner keeps free per
+	// model and GPU ("<model path>#<gpu index>"), learned when a load used
+	// more than the plan expected (see httpapi's VRAM check).
+	VRAMCorrections map[string]uint64 `json:"vram_corrections,omitempty"`
+
 	// SystemPrompt is injected by the API proxy according to SystemPromptMode
 	// ("off", "default": only when a request has none, "override": always).
 	SystemPrompt     string `json:"system_prompt,omitempty"`
@@ -267,4 +272,9 @@ func LocateLlamaServer(cfg Config) string {
 func fileExists(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && !fi.IsDir()
+}
+
+// VRAMCorrectionKey is the VRAMCorrections key for a model on a GPU.
+func VRAMCorrectionKey(modelPath string, gpuIndex int) string {
+	return modelPath + "#" + strconv.Itoa(gpuIndex)
 }
