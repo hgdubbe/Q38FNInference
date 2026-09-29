@@ -183,6 +183,13 @@ router's own id; when the file changes the launcher calls
 `--api-key` and `--sleep-idle-seconds` are passed to the router, which the
 model instances inherit.
 
+Split models (`-0000k-of-0000N.gguf`) become one section pointing at part 1;
+llama.cpp loads the rest. A model with missing parts is left out and named in
+the scan notes, and a file reached through two overlapping model folders is
+counted once. Model ids strip only the shard suffix and `.gguf`, so dots in
+names (`Qwen3.8`) survive. Single-model mode passes the same id as `--alias`
+(unless one is set), so `/v1/models` reports it instead of the part-1 path.
+
 ## Performance work (backend source review)
 
 What the llama.cpp source review turned up, and what was done about it.

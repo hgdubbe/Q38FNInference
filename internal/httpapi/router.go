@@ -113,14 +113,13 @@ func (s *Server) modelDirs() []string {
 	return append(dirs, s.Config().ExtraModelDirs...)
 }
 
-var shardSuffix = regexp.MustCompile(`(?i)-\d{5}-of-\d{5}\.gguf$`)
+var ggufSuffix = regexp.MustCompile(`(?i)(-\d{5}-of-\d{5})?\.gguf$`)
 
 // modelName is the id API clients use: the file name without the shard
-// suffix or extension, which usually already carries the quantization.
+// suffix and ".gguf", which usually already carries the quantization. Only
+// ".gguf" goes: names like "Qwen3.8-…" have dots of their own.
 func modelName(path string) string {
-	base := filepath.Base(path)
-	base = shardSuffix.ReplaceAllString(base, "")
-	return strings.TrimSuffix(base, filepath.Ext(base))
+	return ggufSuffix.ReplaceAllString(filepath.Base(path), "")
 }
 
 // planFor returns the cached launch plan for a model file, computing it
@@ -161,8 +160,12 @@ func (s *Server) buildEntries(rt *routerRun, known []routerModel) ([]router.Entr
 
 	var paths, names []string
 	for _, g := range groups {
-		if len(g.Files) == 0 || (g.Files[0].IsShard && len(g.Files) != g.Files[0].ShardTotal) {
-			continue // incomplete split model, e.g. still downloading
+		if ok, have, total := g.Complete(); !ok {
+			// e.g. still downloading; say so rather than leave it out silently
+			if len(g.Files) > 0 {
+				notes = append(notes, fmt.Sprintf("%s: only %d of %d parts found", modelName(g.Files[0].Path), have, total))
+			}
+			continue
 		}
 		paths = append(paths, g.Files[0].Path)
 		names = append(names, router.SafeName(modelName(g.Files[0].Path)))

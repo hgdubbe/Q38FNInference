@@ -157,3 +157,14 @@ func TestCacheRAMArgs(t *testing.T) {
 		}
 	}
 }
+
+func TestModelNameIsAPIFriendly(t *testing.T) {
+	for in, want := range map[string]string{
+		"/m/RVN-Qwen3.8-Flash-Next-IQ4_XS-00001-of-00008.gguf": "RVN-Qwen3.8-Flash-Next-IQ4_XS",
+		"/m/tiny.gguf": "tiny",
+	} {
+		if got := modelName(in); got != want {
+			t.Errorf("modelName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

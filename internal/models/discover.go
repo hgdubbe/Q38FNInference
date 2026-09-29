@@ -70,6 +70,10 @@ func appModelsDir() string {
 // *.gguf file found, grouped into logical models by split-shard naming.
 func Scan(dirs []string) ([]Group, error) {
 	var found []Found
+	// the same file reached through overlapping search folders (a folder and
+	// its parent, or one path spelled in another case on Windows) counts
+	// once: a doubled shard would make a complete split model look broken
+	seen := map[string]bool{}
 
 	for _, dir := range dirs {
 		info, err := os.Stat(dir)
@@ -90,6 +94,11 @@ func Scan(dirs []string) ([]Group, error) {
 			if err != nil {
 				return nil
 			}
+			k := pathKey(path)
+			if seen[k] {
+				return nil
+			}
+			seen[k] = true
 			found = append(found, newFound(path, fi.Size(), dir))
 			return nil
 		})
@@ -174,6 +183,37 @@ func group(found []Found) []Group {
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
 	return groups
+}
+
+// pathKey identifies a file regardless of how the search folder was spelled.
+func pathKey(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	path = filepath.Clean(path)
+	if runtime.GOOS == "windows" {
+		path = strings.ToLower(path)
+	}
+	return path
+}
+
+// Complete reports whether a split model has every part 1..N, and how many
+// distinct parts were found. A single-file model is always complete.
+func (g Group) Complete() (ok bool, have, total int) {
+	if len(g.Files) == 0 {
+		return false, 0, 0
+	}
+	if !g.Files[0].IsShard {
+		return true, 1, 1
+	}
+	total = g.Files[0].ShardTotal
+	parts := map[int]bool{}
+	for _, f := range g.Files {
+		if f.IsShard && f.ShardTotal == total && f.ShardIndex >= 1 && f.ShardIndex <= total {
+			parts[f.ShardIndex] = true
+		}
+	}
+	return len(parts) == total, len(parts), total
 }
 
 func atoi(s string) int {

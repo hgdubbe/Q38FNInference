@@ -513,32 +513,127 @@ function renderLocalModels() {
   }
 }
 
-// Run page picker: the same list as radio-style rows (recognition rather than recall)
+// Run page model choice: a dropdown (button + listbox, the ARIA "select-only
+// combobox" pattern) so a long model list doesn't push the page down.
+function modelSummary(g) {
+  const d = el('span', 'dd-summary');
+  if (!g) {
+    d.appendChild(el('span', 'dd-title', 'Choose a model'));
+    return d;
+  }
+  const t = el('span', 'dd-title');
+  t.appendChild(el('span', '', g.Name));
+  modelBadges(g).forEach((b) => b && t.appendChild(b));
+  d.append(t, el('span', 'dd-meta', `${fmtBytes(g.TotalSize)} · ${g.Files[0].Path}`));
+  return d;
+}
+
 function renderPicker() {
   const box = $('model-picker');
   box.textContent = '';
+  delete box.dataset.open;
   if (state.localGroups.length === 0) {
     box.appendChild(empty('No model yet', 'Download one from Hugging Face to get started.',
       button('Find a model', () => showPage('models'), 'btn-primary btn-sm')));
     return;
   }
-  for (const g of state.localGroups) {
-    const path = g.Files[0].Path;
-    const row = item({ title: g.Name, badges: modelBadges(g), meta: `${fmtBytes(g.TotalSize)} · ${path}`, lead: el('span', 'radio-dot') });
-    row.classList.add('selectable');
-    row.tabIndex = 0;
-    row.setAttribute('role', 'radio');
-    const on = state.model && state.model.path === path;
-    row.setAttribute('aria-checked', on ? 'true' : 'false');
-    if (on) row.classList.add('selected');
-    const pick = () => { if (!on) selectModel(path, g.Name); };
-    row.addEventListener('click', pick);
-    row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
-    box.appendChild(row);
+  const groups = state.localGroups;
+  const cur = groups.findIndex((g) => state.model && g.Files[0].Path === state.model.path);
+
+  const btn = el('button', 'dd-button');
+  btn.type = 'button';
+  btn.id = 'model-dd-button';
+  btn.setAttribute('aria-haspopup', 'listbox');
+  btn.setAttribute('aria-expanded', 'false');
+  btn.setAttribute('aria-label', 'Model: ' + (cur >= 0 ? groups[cur].Name : 'none chosen'));
+  const caret = el('span', 'dd-caret');
+  caret.setAttribute('aria-hidden', 'true');
+  btn.append(modelSummary(groups[cur]), caret);
+
+  const list = el('ul', 'dd-list');
+  list.id = 'model-dd-list';
+  list.tabIndex = -1;
+  list.hidden = true;
+  list.setAttribute('role', 'listbox');
+  list.setAttribute('aria-label', 'Models on this PC');
+  btn.setAttribute('aria-controls', list.id);
+
+  let active = Math.max(cur, 0);
+  const opts = groups.map((g, i) => {
+    const li = el('li', 'dd-option');
+    li.id = 'model-opt-' + i;
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-selected', String(i === cur));
+    li.appendChild(modelSummary(g));
+    li.addEventListener('mousedown', (e) => e.preventDefault()); // keep focus on the list
+    li.addEventListener('click', () => choose(i));
+    li.addEventListener('mousemove', () => setActive(i, false));
+    list.appendChild(li);
+    return li;
+  });
+
+  function setActive(i, scroll = true) {
+    active = (i + opts.length) % opts.length;
+    opts.forEach((o, k) => o.classList.toggle('active', k === active));
+    list.setAttribute('aria-activedescendant', opts[active].id);
+    if (scroll) opts[active].scrollIntoView({ block: 'nearest' });
   }
-  box.setAttribute('role', 'radiogroup');
-  box.setAttribute('aria-label', 'Model');
+  function open() {
+    list.hidden = false;
+    box.dataset.open = '';
+    btn.setAttribute('aria-expanded', 'true');
+    setActive(Math.max(cur, 0));
+    list.focus();
+  }
+  function close(focusButton = true) {
+    if (list.hidden) return;
+    list.hidden = true;
+    delete box.dataset.open;
+    btn.setAttribute('aria-expanded', 'false');
+    if (focusButton) btn.focus();
+  }
+  function choose(i) {
+    close();
+    const g = groups[i];
+    if (i !== cur) selectModel(g.Files[0].Path, g.Name);
+  }
+
+  btn.addEventListener('click', () => (list.hidden ? open() : close()));
+  btn.addEventListener('keydown', (e) => {
+    if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(e.key)) { e.preventDefault(); open(); }
+  });
+  let typed = '', typedAt = 0;
+  list.addEventListener('keydown', (e) => {
+    switch (e.key) {
+      case 'ArrowDown': e.preventDefault(); setActive(active + 1); break;
+      case 'ArrowUp': e.preventDefault(); setActive(active - 1); break;
+      case 'Home': e.preventDefault(); setActive(0); break;
+      case 'End': e.preventDefault(); setActive(opts.length - 1); break;
+      case 'Enter': case ' ': e.preventDefault(); choose(active); break;
+      case 'Escape': e.preventDefault(); close(); break;
+      case 'Tab': close(false); break;
+      default:
+        // type to jump to a model by name
+        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          const now = Date.now();
+          typed = (now - typedAt > 700 ? '' : typed) + e.key.toLowerCase();
+          typedAt = now;
+          const hit = groups.findIndex((g) => g.Name.toLowerCase().startsWith(typed));
+          if (hit >= 0) setActive(hit);
+        }
+    }
+  });
+  list.addEventListener('blur', () => setTimeout(() => { if (!box.contains(document.activeElement)) close(false); }, 0));
+
+  box._close = close;
+  box.append(btn, list);
 }
+
+// a click anywhere else closes an open model dropdown, leaving focus where it went
+document.addEventListener('mousedown', (e) => {
+  const box = $('model-picker');
+  if (box && box._close && !box.contains(e.target)) box._close(false);
+});
 
 function selectModel(path, label, quiet) {
   state.model = { path, label };

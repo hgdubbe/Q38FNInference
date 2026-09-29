@@ -462,6 +462,11 @@ func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU) (*tuneResponse, e
 		level = reasoning.High
 	}
 	args := append(plan.Args(modelPath), cacheRAMArgs(plan, mem)...)
+	if ms.Alias == "" {
+		// without an alias llama-server reports the model as its file path, which for
+		// a split model is the path of part 1; use the id on-demand mode uses instead
+		args = append(args, "--alias", modelName(modelPath))
+	}
 	args = append(args, ms.Args()...)
 	args = append(args, style.Args(level)...)
 	return &tuneResponse{Plan: plan, Args: args, Reasoning: style.Name}, nil
