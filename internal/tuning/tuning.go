@@ -86,6 +86,10 @@ type Options struct {
 	// NoOpOffload: llama-server runs with --no-op-offload, so RAM-resident
 	// weights are never copied to the GPU and need no staging VRAM.
 	NoOpOffload bool
+
+	// qsaCells is the context size when the QSA sparse path can run (the
+	// cache can outgrow the indexer budget), else 0; see qsaComputeBytes.
+	qsaCells uint64
 }
 
 // llama.cpp's LLM_FFN_EXPS_REGEX (common/common.h), anchored to a block index.
@@ -106,6 +110,32 @@ const (
 	// spreads that fixed PCIe cost over more tokens.
 	offloadUBatch = 2048
 )
+
+// qsaBytesPerCellToken is what the QSA top-k selection needs in the compute
+// buffer per KV cell and micro-batch token once the cache outgrows the
+// indexer budget: the block scores expanded to every cell (f32) plus the
+// attention mask built from the selection (f16), measured with
+// patches/0004 at 32k cells (825 MiB at ubatch 2048, 207 MiB at 512). Every
+// GPU holding a full-attention layer needs it.
+const qsaBytesPerCellToken = 13
+
+func qsaComputeBytes(cells uint64, ub int) uint64 {
+	return cells * uint64(ub) * qsaBytesPerCellToken
+}
+
+// qsaCells: the context size if the sparse path can run, i.e. top-k keeps
+// fewer cells than the context holds (llama.cpp keeps top_k + ratio - 1).
+func qsaCells(m *gguf.Metadata, ctx uint64) uint64 {
+	topK, ok := m.IndexerTopK()
+	r := m.MinCompressRatio()
+	if !ok || topK == 0 || r == 0 {
+		return 0
+	}
+	if topK+r-1 >= ctx {
+		return 0
+	}
+	return ctx
+}
 
 // computeMain is the main GPU's compute buffer estimate for a micro-batch
 // size: activations grow with it (roughly +512 MiB going 512 -> 2048).
@@ -179,6 +209,7 @@ func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 	}
 
 	cacheNote := addCacheBytes(m, slots[:n], ctx, opt)
+	opt.qsaCells = qsaCells(m, ctx)
 
 	plan := &Plan{
 		CtxSize:     ctx,
@@ -232,11 +263,18 @@ func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 	}
 	nCPUMoE, k, staging := solve(slots, gpus, opt, ub)
 	if opt.UBatch == 0 && (nCPUMoE > 0 || k < n+1) {
-		// weights stay in RAM: re-plan with the larger micro-batch, whose
-		// bigger compute buffer may push one more block's experts to RAM
-		ub = offloadUBatch
-		nCPUMoE, k, staging = solve(slots, gpus, opt, ub)
-		plan.UBatch = ub
+		// weights stay in RAM: re-plan with a larger micro-batch, whose
+		// bigger compute buffer may push one more block's experts to RAM.
+		// With QSA at long contexts the buffer grows with context x
+		// micro-batch, so stop at the largest size that costs at most that.
+		for _, try := range []int{offloadUBatch, offloadUBatch / 2} {
+			N2, k2, st2 := solve(slots, gpus, opt, try)
+			if k2 == k && N2 <= nCPUMoE+1 {
+				ub, nCPUMoE, k, staging = try, N2, k2, st2
+				plan.UBatch = ub
+				break
+			}
+		}
 	} else if opt.UBatch != 0 {
 		plan.UBatch = opt.UBatch
 	}
@@ -316,6 +354,7 @@ func deviceBudgets(gpus []GPU, opt Options, ub int, staging uint64) []int64 {
 		if d == 0 {
 			compute = computeMain(ub) + staging
 		}
+		compute += qsaComputeBytes(opt.qsaCells, ub)
 		budgets[d] = int64(g.FreeBytes) - int64(cudaContextBytes+compute+opt.ReserveBytes)
 	}
 	return budgets
@@ -398,7 +437,7 @@ func addCacheBytes(m *gguf.Metadata, blocks []slot, ctx uint64, opt Options) str
 	recr := m.RecurrentLayers()
 	keyLen, _ := m.Uint("attention.key_length")
 	valLen, _ := m.Uint("attention.value_length")
-	idxHeads, _ := m.Uint("attention.indexer.head_count")
+	// the indexer caches one pooled-from key per cell, not one per indexer head
 	idxKeyLen, _ := m.Uint("attention.indexer.key_length")
 
 	dConv, _ := m.Uint("ssm.conv_kernel")
@@ -430,7 +469,7 @@ func addCacheBytes(m *gguf.Metadata, blocks []slot, ctx uint64, opt Options) str
 			v = keyLen
 		}
 		perToken := float64(nKV*(keyLen+v)) * kvElem
-		perToken += float64(idxHeads*idxKeyLen) * kvElem
+		perToken += float64(idxKeyLen) * kvElem
 		blocks[il].cache += uint64(perToken * float64(ctx))
 	}
 	if missingKV {

@@ -144,6 +144,26 @@ func (m *Metadata) HyperConnectionCount() uint64 {
 // IndexerTopK is the QSA sparse-attention token budget per query.
 func (m *Metadata) IndexerTopK() (uint64, bool) { return m.getUint("attention.indexer.top_k") }
 
+// MinCompressRatio is the smallest QSA block size (tokens pooled per indexer
+// key) over the layers that have one; 0 when the model has none.
+func (m *Metadata) MinCompressRatio() uint64 {
+	v, ok := m.KV[m.key("attention.compress_ratios")]
+	if !ok {
+		return 0
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return asUint(v)
+	}
+	var least uint64
+	for _, x := range arr {
+		if r := asUint(x); r > 0 && (least == 0 || r < least) {
+			least = r
+		}
+	}
+	return least
+}
+
 // NFFExp is the per-expert feed-forward hidden size.
 func (m *Metadata) NFFExp() (uint64, bool) {
 	if v, ok := m.KV[m.key("expert_feed_forward_length")]; ok {

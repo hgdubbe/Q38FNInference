@@ -209,6 +209,34 @@ Changed:
   empty context and 3.5x at 4096 tokens. On the real model the share is
   smaller (the experts dominate), but the query projection alone is 12
   layers x n_embd x 8192 weights read per token for nothing.
+- **QSA indexer memory** (`patches/0004-qwen4exp-qsa-fused-indexer.patch`).
+  Once the sparse path runs, qwen4exp scored every block with a plain
+  matmul: a `[blocks x 64 heads x tokens]` f32 tensor, then a ReLU copy of
+  it, then a sum over the heads. At 32k context and micro-batch 2048 each
+  is 4 GiB, and they set the compute buffer (VRAM, on every GPU with a
+  full-attention layer): 8.5 GiB on the random-weight test model, whose
+  KV cache is 32 MiB. The patch uses ggml's fused lightning-indexer op
+  (written for DeepSeek's indexer, CUDA kernel for head size 128 with 32/64
+  heads), which never materialises it, and adds the attention mask to the
+  transposed block scores directly instead of copying both. Compute buffer
+  8549 -> 825 MiB (ubatch 2048) and 2143 -> 207 MiB (ubatch 512); logits
+  identical; CPU prompt processing +12%, generation +6% at 4096 tokens.
+  What remains is ~13 bytes per cell per micro-batch token (the block
+  scores expanded to cells, the selection mask).
+- **Planner: QSA compute and indexer cache.** The planner now reserves that
+  remaining 13 B x context x micro-batch on each GPU when the context can
+  outgrow the indexer budget, and raises the micro-batch for RAM-resident
+  experts only as far as it doesn't cost more than one extra block's
+  experts. It also counted the indexer cache as 64 heads x 128 per token;
+  llama.cpp stores one 128-wide key per cell, so the old plan
+  overestimated it 64x (several GiB at 64k context) and pushed experts to
+  RAM for nothing.
+- **Prompt cache capped to spare RAM.** llama-server keeps up to 8 GiB of
+  idle-slot state in host RAM by default (`--cache-ram 8192`). With the
+  experts memory-mapped from a model that already fills RAM, that cache
+  evicts expert pages, which are then re-read from disk per token. The
+  launcher passes `--cache-ram` with what the RAM-resident weights leave
+  (minus 4 GiB for the OS and buffers), or leaves the default when it fits.
 - **RAM check.** The plan warns when the weights kept in RAM exceed physical
   memory (they are memory-mapped and would be re-read from disk per token).
 - **Benchmark** (Run tab): a fixed ~1500-token prompt plus exactly 128
@@ -232,6 +260,15 @@ Looked at and left alone:
 - **CUDA kernels** (gated delta net, MMQ, flash attention) are already
   specialised per architecture; changing them without a GPU to verify
   correctness and speed would be guesswork.
+- **Recurrent-state rollback slots and context checkpoints** only cost
+  memory with speculative decoding (slots) or every 8192 tokens
+  (checkpoints of the small recurrent state); nothing to change.
+- **Selecting whole blocks instead of cells** would shrink the remaining
+  QSA buffer another ~4x, but the per-cell top-k can split a block at the
+  budget boundary, so it wouldn't reproduce the reference selection exactly.
+  **Caching pooled indexer keys** (only the newest block changes per token)
+  would save re-pooling the whole cache each step; it needs a new cache
+  tensor, and pooling is ~1/16 of the scoring cost at ratio 4.
 - **Other graph work.** The hyper-connection mixers already use fused ops
   upstream; the remaining small elementwise ops are a few microseconds each
   on a GPU next to milliseconds of expert streaming.

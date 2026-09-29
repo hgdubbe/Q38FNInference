@@ -138,3 +138,22 @@ func TestRAMCheck(t *testing.T) {
 		}
 	}
 }
+
+func TestCacheRAMArgs(t *testing.T) {
+	const G = uint64(1 << 30)
+	plan := &tuning.Plan{CPUFitBytes: 45 * G, InputBytes: 5 * G} // 40 GiB of weights in RAM
+	cases := []struct {
+		mem  sysmem.Info
+		want []string
+	}{
+		{sysmem.Info{}, nil},
+		{sysmem.Info{Total: 128 * G, OK: true}, nil}, // the 8 GiB default fits
+		{sysmem.Info{Total: 48 * G, OK: true}, []string{"--cache-ram", "4096"}},
+		{sysmem.Info{Total: 32 * G, OK: true}, []string{"--cache-ram", "0"}},
+	}
+	for _, c := range cases {
+		if got := cacheRAMArgs(plan, c.mem); !slices.Equal(got, c.want) {
+			t.Errorf("cacheRAMArgs(total %d GiB) = %v, want %v", c.mem.Total/G, got, c.want)
+		}
+	}
+}

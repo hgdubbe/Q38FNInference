@@ -411,7 +411,8 @@ func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU) (*tuneResponse, e
 	if note := sizeCheck(modelPath, meta); note != "" {
 		plan.Notes = append(plan.Notes, note)
 	}
-	if note := ramCheck(plan, sysmem.Read()); note != "" {
+	mem := sysmem.Read()
+	if note := ramCheck(plan, mem); note != "" {
 		plan.Notes = append(plan.Notes, note)
 	}
 
@@ -421,7 +422,8 @@ func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU) (*tuneResponse, e
 	if level == "" {
 		level = reasoning.High
 	}
-	args := append(plan.Args(modelPath), ms.Args()...)
+	args := append(plan.Args(modelPath), cacheRAMArgs(plan, mem)...)
+	args = append(args, ms.Args()...)
 	args = append(args, style.Args(level)...)
 	return &tuneResponse{Plan: plan, Args: args, Reasoning: style.Name}, nil
 }
@@ -442,6 +444,27 @@ func ramCheck(plan *tuning.Plan, mem sysmem.Info) string {
 		return fmt.Sprintf("%.1f GiB of weights stay in RAM and only %.1f GiB is free right now: close other programs, or the first answers will be slow while Windows pages", gib(need), gib(mem.Available))
 	}
 	return fmt.Sprintf("%.1f GiB of weights stay in RAM (%.1f GiB free)", gib(need), gib(mem.Available))
+}
+
+// cacheRAMArgs caps llama-server's prompt cache (--cache-ram, 8 GiB by
+// default) to the RAM the RAM-resident weights leave over. The cache lives in
+// host memory, so past that it evicts memory-mapped expert pages, which are
+// then re-read from disk for every token. Nothing when the default fits.
+func cacheRAMArgs(plan *tuning.Plan, mem sysmem.Info) []string {
+	const llamaDefaultMiB = 8192
+	if !mem.OK || plan.CPUFitBytes <= plan.InputBytes {
+		return nil
+	}
+	// weights, plus Windows, the launcher and llama-server's CPU buffers
+	need := plan.CPUFitBytes - plan.InputBytes + 4<<30
+	var spare uint64
+	if mem.Total > need {
+		spare = (mem.Total - need) >> 20
+	}
+	if spare >= llamaDefaultMiB {
+		return nil
+	}
+	return []string{"--cache-ram", strconv.FormatUint(spare, 10)}
 }
 
 // sizeCheck flags a plan built from fewer tensor bytes than the model files

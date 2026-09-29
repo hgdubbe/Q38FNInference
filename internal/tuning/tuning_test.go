@@ -222,6 +222,57 @@ func TestCacheBytesFromMetadata(t *testing.T) {
 	}
 }
 
+func TestIndexerCacheIsOneKeyPerCell(t *testing.T) {
+	m := synthModel(1, 1*MiB, 1*MiB, 1*MiB)
+	m.KV["qwen4exp.attention.head_count_kv"] = uint32(2)
+	m.KV["qwen4exp.attention.key_length"] = uint32(128)
+	m.KV["qwen4exp.attention.indexer.head_count"] = uint32(64)
+	m.KV["qwen4exp.attention.indexer.key_length"] = uint32(128)
+
+	p, err := Compute(m, []GPU{{FreeBytes: 64 * GiB}}, Options{RequestedCtx: 1024, CacheType: "f16"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := uint64(1024 * (2*(128+128) + 128) * 2) // KV + one indexer key per cell, not 64 heads' worth
+	if want := uint64(2*MiB+1*MiB) + cache; p.GPUFitBytes != want {
+		t.Errorf("GPUFitBytes = %d, want %d", p.GPUFitBytes, want)
+	}
+}
+
+func TestQSAComputeReserve(t *testing.T) {
+	// 8 blocks x (1 GiB experts + 10 MiB shared); the indexer budget is 2048+4-1 cells
+	m := synthModel(8, 1*GiB, 10*MiB, 10*MiB)
+	m.KV["qwen4exp.attention.indexer.top_k"] = uint32(2048)
+	m.KV["qwen4exp.attention.compress_ratios"] = []any{uint32(4), uint32(4)}
+	free := overhead(true) + 3*GiB + 100*MiB
+	gpu := []GPU{{FreeBytes: free}}
+
+	// a context within the budget never runs the sparse path: same plan as without QSA
+	short, err := Compute(m, gpu, Options{RequestedCtx: 2048})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if short.NCPUMoE != 7 || short.UBatch != 2048 {
+		t.Errorf("ctx 2048: ncmoe=%d ubatch=%d, want 7 and 2048", short.NCPUMoE, short.UBatch)
+	}
+
+	// at 64k cells the selection needs 13 B x 65536 x ubatch: 1.6 GiB at 2048
+	// would cost two more blocks' experts, 0.4 GiB at 512 costs one
+	long, err := Compute(m, gpu, Options{RequestedCtx: 65536, NoOpOffload: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if long.UBatch == 2048 {
+		t.Errorf("ctx 64k: ubatch 2048 chosen although it pushes more than one extra block to RAM (ncmoe=%d)", long.NCPUMoE)
+	}
+	if got := qsaComputeBytes(qsaCells(m, 65536), 512); got != 65536*512*13 {
+		t.Errorf("qsaComputeBytes = %d", got)
+	}
+	if qsaCells(m, 2051) != 0 || qsaCells(m, 2052) != 2052 {
+		t.Errorf("sparse threshold must be top_k + ratio - 1 < ctx")
+	}
+}
+
 func TestNoGPU(t *testing.T) {
 	p, err := Compute(synthModel(2, MiB, MiB, MiB), nil, Options{})
 	if err != nil {
