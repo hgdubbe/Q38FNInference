@@ -181,7 +181,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	apiErr := s.apiErr
 	s.mu.Unlock()
-	writeJSON(w, map[string]string{"app": AppID, "api_url": s.apiURL(), "api_error": apiErr})
+	mem := sysmem.Read()
+	writeJSON(w, map[string]any{"app": AppID, "api_url": s.apiURL(), "api_error": apiErr,
+		"ram_total": mem.Total, "ram_available": mem.Available})
 }
 
 func (s *Server) handleQuit(w http.ResponseWriter, r *http.Request) {

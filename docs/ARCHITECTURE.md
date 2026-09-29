@@ -131,8 +131,18 @@ unchanged. llama-server's web UI is also served through the proxy, so the
 prompt applies there too.
 
 The control panel (`internal/httpapi`, port 8787) hosts model management,
-the offload plan, settings, and a small chat tab that talks to the same
-proxy.
+the offload plan and settings; chatting happens in llama.cpp's own web UI
+(Open chat), which goes through the same proxy.
+
+The panel follows established usability guidance: the model's state is
+always visible (sidebar and page header, NN/g "visibility of system
+status"); advanced options are one disclosure level down, never deeper
+(progressive disclosure); every empty list says what's missing and offers
+the next step (NN/g empty-state guidelines); system messages are toasts,
+and only destructive or overwriting actions ask for confirmation; download
+choices show whether a file fits the detected GPUs and RAM, as LM Studio
+does. Colours meet WCAG AA contrast in the dark and light themes, focus is
+always visible, and motion is off under prefers-reduced-motion.
 
 The release exe is linked as a Windows GUI program (`-H windowsgui`): no
 console window, child processes are started hidden, logs go to

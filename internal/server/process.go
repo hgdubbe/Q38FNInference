@@ -31,6 +31,8 @@ type Manager struct {
 	mu     sync.Mutex
 	cmd    *exec.Cmd
 	status Status
+	// stopped: Stop killed the current process, so its exit is not an error
+	stopped bool
 
 	logMu  sync.Mutex
 	logBuf []string // ring buffer of recent log lines
@@ -76,6 +78,7 @@ func (m *Manager) Start(binPath string, args []string, env ...string) error {
 	}
 
 	m.cmd = cmd
+	m.stopped = false
 	m.status = Status{Running: true, PID: cmd.Process.Pid, StartedAt: time.Now(), Args: append([]string{binPath}, args...)}
 
 	var pumps sync.WaitGroup
@@ -107,7 +110,9 @@ func (m *Manager) wait(cmd *exec.Cmd, pumps *sync.WaitGroup) {
 	}
 	m.status.Running = false
 	m.status.Ready = false
-	if err != nil {
+	if m.stopped {
+		m.appendLogLocked("[launcher] server stopped")
+	} else if err != nil {
 		m.status.ExitErr = err.Error()
 		m.appendLogLocked(fmt.Sprintf("[launcher] server exited: %v", err))
 	} else {
@@ -124,6 +129,9 @@ func (m *Manager) Stop() error {
 	m.mu.Lock()
 	cmd := m.cmd
 	running := m.status.Running
+	if cmd != nil && running {
+		m.stopped = true
+	}
 	m.mu.Unlock()
 
 	if cmd == nil || !running {

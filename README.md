@@ -17,7 +17,7 @@ build of `ggml-org/llama.cpp`'s `llama-server`.
   chat template: on/off switches, effort levels, or a thinking-token budget.
 - System prompt override, applied to every chat request (default-only or
   force-replace), with optional presets.
-- Chat tab for quick testing, llama.cpp's own web UI, and an OpenAI-compatible
+- One-click **Open chat** (llama.cpp's own chat UI), and an OpenAI-compatible
   API at `http://127.0.0.1:8080/v1` (streaming and non-streaming; the
   Anthropic-style `/v1/messages` works too).
 - On-demand mode: every local model is offered through the API and loaded
@@ -41,16 +41,19 @@ models go to `%APPDATA%\Q38FNInference\models`.
 
 ## Using it
 
-1. **Models**: pick a local GGUF, or search Hugging Face / list a repo's GGUF
-   files and download one (split models download all shards).
-2. **Run**: tick the GPUs to use, check the launch plan (per-GPU memory,
-   layers, which MoE experts stay in CPU RAM), optionally edit the
-   llama-server arguments, then **Start**. The status pill turns green when
-   the model is loaded.
-3. **Chat**, **Open llama.cpp web UI**, or point any OpenAI client at
-   `http://127.0.0.1:8080/v1`.
-4. **Settings**: system prompt, model/sampling options, API port and bind
-   address (127.0.0.1 or LAN), llama-server path, Hugging Face token.
+1. **Models**: search Hugging Face or open a repository, and download a
+   GGUF. Each file shows its quantization and whether it fits your GPU,
+   GPU + RAM, or is too large; split models download all parts.
+2. **Run**: pick the model, untick any GPU you don't want used, check how it
+   will be loaded (memory per GPU, what stays in RAM), then **Start**. The
+   status turns green when the model is ready; the sidebar shows it on every
+   page.
+3. **Open chat** for llama.cpp's chat window, or point any OpenAI or
+   Anthropic client at `http://127.0.0.1:8080/v1` (the Copy button next to
+   the address copies it).
+4. **Settings**: system prompt (with presets), thinking level and sampling,
+   performance options (folded away by default), API port, network access
+   and key. Changes show a save bar until saved.
 
 ## API
 

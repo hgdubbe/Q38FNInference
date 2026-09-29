@@ -1,12 +1,20 @@
 'use strict';
 
+// Q38FNInference control panel. Plain JS, no build step.
+// Structure: helpers -> feedback (toasts, dialog) -> navigation -> settings ->
+// hardware -> models -> run (status, plan, on-demand, speed test, log) -> init.
+
 const state = {
   cfg: null,
-  model: null,   // { path, label }
-  plan: null,    // last /api/tune response
+  info: {},
+  model: null,        // { path, label } chosen for single mode
+  localGroups: [],
+  plan: null,         // last /api/tune response
   gpus: [],
-  chat: [],      // [{role, content}]
-  abort: null,
+  status: {},
+  mode: 'single',
+  wasReady: false,
+  lastLog: '',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -20,16 +28,26 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await resp.json().catch(() => null);
-  if (!resp.ok) throw new Error((data && data.error) || resp.statusText);
+  if (!resp.ok) {
+    const e = data && data.error;
+    throw new Error((e && (e.message || e)) || resp.statusText || `HTTP ${resp.status}`);
+  }
   return data;
 }
 
 function fmtBytes(n) {
   if (!n) return '0 B';
-  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return n.toFixed(1) + ' ' + u[i];
+  return (n >= 100 || i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + u[i];
+}
+
+function fmtDuration(s) {
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return s + ' s';
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m} min ${s % 60} s` : `${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
 function el(tag, cls, text) {
@@ -39,21 +57,80 @@ function el(tag, cls, text) {
   return e;
 }
 
-function item(name, meta, ...right) {
-  const it = el('div', 'item');
-  const left = el('div');
-  left.appendChild(el('div', 'name', name));
-  if (meta) left.appendChild(el('div', 'meta', meta));
-  it.appendChild(left);
-  right.forEach((r) => it.appendChild(r));
-  return it;
+const ICONS = {
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+  warn: '<path d="M12 3l9 16H3l9-16z"/><path d="M12 10v4M12 17h.01"/>',
+  error: '<circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/>',
+  ok: '<circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/>',
+};
+function icon(name) {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('viewBox', '0 0 24 24');
+  s.setAttribute('aria-hidden', 'true');
+  s.innerHTML = ICONS[name];
+  return s;
 }
 
 function button(text, onClick, cls) {
-  const b = el('button', cls || '', text);
+  const b = el('button', 'btn ' + (cls || 'btn-secondary btn-sm'), text);
   b.type = 'button';
-  b.addEventListener('click', onClick);
+  b.addEventListener('click', (e) => { e.stopPropagation(); onClick(e); });
   return b;
+}
+
+function badge(text, kind) {
+  return el('span', 'badge' + (kind ? ' badge-' + kind : ''), text);
+}
+
+// list row: title (+badges), meta line, actions on the right
+function item({ title, badges = [], meta, actions = [], lead }) {
+  const it = el('div', 'item');
+  if (lead) it.appendChild(lead);
+  const main = el('div', 'item-main');
+  const t = el('div', 'item-title');
+  t.appendChild(el('span', '', title));
+  badges.forEach((b) => b && t.appendChild(b));
+  main.appendChild(t);
+  if (meta) main.appendChild(el('div', 'item-meta', meta));
+  it.appendChild(main);
+  if (actions.length) {
+    const a = el('div', 'item-actions');
+    actions.forEach((x) => x && a.appendChild(x));
+    it.appendChild(a);
+  }
+  return it;
+}
+
+function empty(title, text, action) {
+  const d = el('div', 'empty');
+  d.appendChild(el('b', '', title));
+  if (text) d.appendChild(el('span', '', text));
+  if (action) d.appendChild(action);
+  return d;
+}
+
+function callout(text, kind) {
+  const c = el('div', 'callout callout-' + kind);
+  c.appendChild(icon(kind === 'error' ? 'error' : kind === 'warn' ? 'warn' : 'info'));
+  c.appendChild(el('div', '', text));
+  return c;
+}
+
+// quantization from a GGUF file name, e.g. "...-IQ4_XS-00001-of-00008.gguf"
+function quantOf(name) {
+  const m = name.match(/(?:^|[-_.])((?:I?Q\d(?:_[A-Z0-9]+)*)|BF16|F16|F32|MXFP4)(?=[-_.]|$)/i);
+  return m ? m[1].toUpperCase() : '';
+}
+
+// does a model of `size` bytes fit the selected hardware? (weights only: a rough guide)
+function fitOf(size) {
+  const vram = selectedGPUs().reduce((a, g) => a + g.TotalBytes, 0);
+  const ram = state.info.ram_total || 0;
+  if (!size) return null;
+  if (vram && size * 1.1 <= vram) return { kind: 'ok', label: 'fits in GPU' };
+  if (ram && size <= vram + ram * 0.85) return { kind: 'warn', label: vram ? 'GPU + RAM' : 'runs on CPU' };
+  if (ram) return { kind: 'bad', label: 'too large' };
+  return null;
 }
 
 // shell-ish split so edited args with quoted paths survive
@@ -66,13 +143,54 @@ function splitArgs(s) {
 }
 const joinArgs = (a) => a.map((x) => (/\s/.test(x) || x === '' ? `"${x}"` : x)).join(' ');
 
-// ---- tabs -----------------------------------------------------------------
+// ---- feedback: toasts and confirm dialog ---------------------------------------
+// Toasts for system messages that need no decision; the dialog only where an
+// action is destructive or replaces the user's work.
 
-function showTab(name) {
-  document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
-  document.querySelectorAll('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === 'tab-' + name));
+function toast(text, kind = 'info', ms = 4500) {
+  const t = el('div', 'toast ' + kind);
+  t.appendChild(icon(kind === 'error' ? 'error' : kind === 'ok' ? 'ok' : kind === 'warn' ? 'warn' : 'info'));
+  t.appendChild(el('div', 'toast-body', text));
+  const x = el('button', 'toast-close', '×');
+  x.setAttribute('aria-label', 'Dismiss');
+  x.addEventListener('click', () => t.remove());
+  t.appendChild(x);
+  $('toasts').appendChild(t);
+  if (kind !== 'error') setTimeout(() => t.remove(), ms);
 }
-document.querySelectorAll('.tab-btn').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
+function confirmDialog(title, text, okLabel = 'OK', danger = false) {
+  const d = $('confirm');
+  $('confirm-title').textContent = title;
+  $('confirm-text').textContent = text;
+  const ok = $('confirm-ok');
+  ok.textContent = okLabel;
+  ok.className = 'btn ' + (danger ? 'btn-danger' : 'btn-primary');
+  d.returnValue = '';
+  d.showModal();
+  return new Promise((resolve) => d.addEventListener('close', () => resolve(d.returnValue === 'ok'), { once: true }));
+}
+
+// ---- navigation -----------------------------------------------------------
+
+function showPage(name) {
+  if (!$('page-' + name)) name = 'home';
+  document.querySelectorAll('.nav-btn').forEach((b) => {
+    const on = b.dataset.page === name;
+    b.classList.toggle('active', on);
+    if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
+  document.querySelectorAll('.page').forEach((p) => p.classList.toggle('active', p.id === 'page-' + name));
+  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+  $('main').scrollTop = 0;
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll('.nav-btn').forEach((b) => b.addEventListener('click', () => showPage(b.dataset.page)));
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-goto]');
+  if (t) showPage(t.dataset.goto);
+});
+window.addEventListener('hashchange', () => showPage(location.hash.slice(1)));
 
 // ---- settings -------------------------------------------------------------
 
@@ -96,6 +214,7 @@ function fillForm(cfg) {
     if (!f.name) continue;
     const v = getPath(cfg, f.name);
     if (f.type === 'checkbox') f.checked = !!v;
+    else if (f.type === 'radio') f.checked = f.value === (v || 'off');
     else if (f.name === 'extra_model_dirs') f.value = (v || []).join('\n');
     else if (f.tagName === 'SELECT') {
       // unset or legacy values (e.g. reasoning "on") fall back to the marked default
@@ -104,6 +223,7 @@ function fillForm(cfg) {
       f.value = v != null && v !== '' && ok ? v : def.value;
     } else f.value = v == null ? '' : v;
   }
+  updateSavebar();
 }
 
 function readForm() {
@@ -112,7 +232,8 @@ function readForm() {
   for (const f of form.elements) {
     if (!f.name) continue;
     let v;
-    if (f.type === 'checkbox') v = f.checked;
+    if (f.type === 'radio') { if (!f.checked) continue; v = f.value; }
+    else if (f.type === 'checkbox') v = f.checked;
     else if (f.name === 'extra_model_dirs') v = f.value.split('\n').map((s) => s.trim()).filter(Boolean);
     else if (numberFields.has(f.name)) v = f.value === '' ? undefined : Number(f.value);
     else v = f.value.trim() === '' ? undefined : f.value.trim();
@@ -122,11 +243,48 @@ function readForm() {
   return cfg;
 }
 
+// compare only what the form edits, so values changed elsewhere (GPUs, mode) don't count
+function formDirty() {
+  if (!state.cfg) return false;
+  const a = readForm();
+  for (const f of form.elements) {
+    if (!f.name || (f.type === 'radio' && !f.checked)) continue;
+    const x = getPath(a, f.name), y = getPath(state.cfg, f.name);
+    const norm = (v) => (v === undefined || v === null || v === '' || v === false || (Array.isArray(v) && !v.length) ? '' : JSON.stringify(v));
+    if (f.type === 'radio' && (y || 'off') === x) continue;
+    if (norm(x) !== norm(y)) return true;
+  }
+  return false;
+}
+function updateSavebar() { $('savebar').hidden = !formDirty(); }
+form.addEventListener('input', updateSavebar);
+form.addEventListener('change', updateSavebar);
+$('settings-reset').addEventListener('click', () => fillForm(state.cfg));
+
 async function saveConfig(cfg) {
   state.cfg = await api('POST', '/api/config', cfg);
-  renderSystemHint();
   return state.cfg;
 }
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const invalid = [...form.elements].find((f) => f.willValidate && !f.checkValidity());
+  if (invalid) {
+    invalid.focus();
+    toast(`${invalid.closest('.field')?.querySelector('.field-label')?.textContent || 'A field'}: ${invalid.validationMessage}`, 'error');
+    return;
+  }
+  try {
+    await saveConfig(readForm());
+    fillForm(state.cfg);
+    toast(state.status.Running ? 'Settings saved. Restart the model to apply model settings.' : 'Settings saved.', 'ok');
+    computeTune();
+  } catch (err) {
+    toast('Could not save settings: ' + err.message, 'error');
+  }
+});
+
+window.addEventListener('beforeunload', (e) => { if (formDirty()) { e.preventDefault(); e.returnValue = ''; } });
 
 // presets only fill the text box; nothing is applied until Save
 const promptPresets = {
@@ -164,69 +322,89 @@ const promptPresets = {
     '- Structure the result: a short direct answer first, then supporting details, then open questions or suggested next steps.',
   ].join('\n'),
 };
-$('prompt-preset').addEventListener('change', (e) => {
-  const preset = e.target.value;
-  const text = promptPresets[preset];
-  e.target.value = '';
-  if (!text) return;
+
+$('prompt-presets').addEventListener('click', async (e) => {
+  const chip = e.target.closest('[data-preset]');
+  if (!chip) return;
+  const preset = chip.dataset.preset;
   const box = form.elements['system_prompt'];
-  if (box.value.trim() && !confirm('Replace the current system prompt with this preset?')) return;
-  box.value = text;
-  const mode = form.elements['system_prompt_mode'];
-  if (preset === 'agentic' && mode.value !== 'combine') {
+  if (box.value.trim() && box.value !== promptPresets[preset] &&
+      !(await confirmDialog('Replace the system prompt?', `The current text will be replaced by the "${chip.textContent}" preset.`, 'Replace'))) return;
+  box.value = promptPresets[preset];
+  const radios = form.querySelectorAll('input[name=system_prompt_mode]');
+  const mode = [...radios].find((r) => r.checked);
+  if (preset === 'agentic') {
     // agent clients send their own system prompt with the tool instructions
-    mode.value = 'combine';
-    $('settings-status').textContent = 'Preset inserted and mode set to "combine" so the agent keeps its own instructions. Save to apply.';
-  } else {
-    $('settings-status').textContent = 'Preset inserted — pick a mode and Save to apply it.';
+    radios.forEach((r) => { r.checked = r.value === 'combine'; });
+    toast('Mode set to "Put in front" so agents keep their own instructions. Save to apply.');
+  } else if (!mode || mode.value === 'off') {
+    radios.forEach((r) => { r.checked = r.value === 'default'; });
+    toast('Preset inserted and mode set to "As a default". Save to apply.');
   }
+  updateSavebar();
+  box.focus();
 });
 
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  try {
-    await saveConfig(readForm());
-    $('settings-status').textContent = 'Saved. Model settings apply on the next Start.';
-    computeTune();
-  } catch (err) {
-    $('settings-status').textContent = 'Error: ' + err.message;
-  }
-});
+// ---- hardware -------------------------------------------------------------
 
-function renderSystemHint() {
-  const c = state.cfg || {};
-  $('chat-sys').textContent = c.system_prompt && c.system_prompt_mode !== 'off'
-    ? `System prompt (${c.system_prompt_mode}): ${c.system_prompt.slice(0, 120)}${c.system_prompt.length > 120 ? '…' : ''}`
-    : '';
+function selectedGPUs() {
+  const sel = (state.cfg && state.cfg.gpus) || [];
+  if (sel.length === 1 && sel[0] === -1) return [];
+  return state.gpus.filter((g) => sel.length === 0 || sel.includes(g.Index));
 }
 
-// ---- GPUs -----------------------------------------------------------------
-
 async function loadGPUs() {
-  const box = $('gpu-list');
   try {
     state.gpus = await api('GET', '/api/gpus');
   } catch (e) {
-    box.textContent = 'Error detecting GPUs: ' + e.message;
+    state.gpus = [];
+    $('gpu-list').replaceChildren(callout('Could not detect GPUs: ' + e.message, 'error'));
     return;
   }
+  renderGPUs();
+}
+
+function renderGPUs() {
+  const box = $('gpu-list');
   box.textContent = '';
+  const ram = state.info.ram_total;
+  $('hw-summary').textContent = ram ? `${fmtBytes(ram)} RAM (${fmtBytes(state.info.ram_available)} free)` : '';
   if (state.gpus.length === 0) {
-    box.appendChild(el('div', 'hint', 'No NVIDIA GPU detected (nvidia-smi not found) — models will run on CPU.'));
+    box.appendChild(callout('No NVIDIA GPU found. Models will run on the CPU, which is much slower. Install a current NVIDIA driver if you have a GPU.', 'warn'));
     return;
   }
-  const sel = (state.cfg && state.cfg.gpus) || [];
+  const chosen = new Set(selectedGPUs().map((g) => g.Index));
+  const planBytes = {};
+  const p = state.plan && state.plan.plan;
+  if (p && p.Devices) p.Devices.forEach((d, i) => { planBytes[d] = p.DeviceBytes[i]; });
+
   for (const g of state.gpus) {
+    const card = el('label', 'gpu' + (chosen.has(g.Index) ? '' : ' off'));
+    const top = el('div', 'gpu-top');
     const cb = el('input');
     cb.type = 'checkbox';
-    cb.checked = sel.length === 0 || sel.includes(g.Index);
-    cb.addEventListener('change', onGPUToggle);
+    cb.checked = chosen.has(g.Index);
     cb.dataset.index = g.Index;
-    const lbl = el('label', 'inline name');
-    lbl.append(cb, `GPU ${g.Index}: ${g.Name}`);
-    const row = el('div', 'item');
-    row.append(lbl, el('div', 'meta', `${fmtBytes(g.FreeBytes)} free of ${fmtBytes(g.TotalBytes)}`));
-    box.appendChild(row);
+    cb.addEventListener('change', onGPUToggle);
+    top.append(cb, el('span', '', g.Name));
+    card.appendChild(top);
+
+    const used = g.TotalBytes - g.FreeBytes;
+    const model = state.mode === 'single' && chosen.has(g.Index) ? (planBytes[g.Index] || 0) : 0;
+    const meter = el('div', 'meter');
+    meter.setAttribute('role', 'img');
+    const usedBar = el('span', 'm-used');
+    usedBar.style.width = (used / g.TotalBytes * 100) + '%';
+    const modelBar = el('span', 'm-model');
+    modelBar.style.width = Math.min(100, model / g.TotalBytes * 100) + '%';
+    meter.append(usedBar, modelBar);
+    meter.setAttribute('aria-label', `${fmtBytes(used)} in use by other programs, ${fmtBytes(model)} planned for the model, of ${fmtBytes(g.TotalBytes)}`);
+    card.appendChild(meter);
+    const leg = el('div', 'meter-legend');
+    leg.append(el('span', '', model ? `model ${fmtBytes(model)}` : chosen.has(g.Index) ? `${fmtBytes(g.FreeBytes)} free` : 'not used'),
+      el('span', '', `${fmtBytes(g.TotalBytes)} total`));
+    card.appendChild(leg);
+    box.appendChild(card);
   }
 }
 
@@ -237,64 +415,139 @@ async function onGPUToggle() {
   // all selected == "use every GPU", which also covers GPUs added later
   cfg.gpus = chosen.length === boxes.length ? [] : chosen;
   if (chosen.length === 0) cfg.gpus = [-1];
-  await saveConfig(cfg);
+  try { await saveConfig(cfg); } catch (e) { toast(e.message, 'error'); }
+  if (chosen.length === 0) toast('No GPU selected: the model will run on the CPU.', 'warn');
+  renderGPUs();
   computeTune();
 }
 
 // ---- models ---------------------------------------------------------------
 
 async function loadLocalModels() {
-  const box = $('local-models');
-  box.textContent = 'Scanning…';
   try {
-    const groups = await api('GET', '/api/models/local');
-    box.textContent = '';
-    if (groups.length === 0) box.appendChild(el('div', 'hint', 'No GGUF models found yet — download one below.'));
-    for (const g of groups) {
-      const shards = g.Files.length > 1 ? `${g.Files.length} shards, ` : '';
-      const file = g.Files[0].Path;
-      box.appendChild(item(g.Name, `${shards}${fmtBytes(g.TotalSize)} — ${file}`,
-        button('Use', () => selectModel(file, g.Name))));
-    }
-    if (!state.model && state.cfg && state.cfg.last_model_path) {
-      const last = groups.flatMap((g) => g.Files).find((f) => f.Path === state.cfg.last_model_path);
-      if (last) selectModel(last.Path, last.Repo || last.Path, true);
-    }
+    state.localGroups = await api('GET', '/api/models/local');
   } catch (e) {
-    box.textContent = 'Error: ' + e.message;
+    $('local-models').replaceChildren(callout('Could not scan for models: ' + e.message, 'error'));
+    return;
+  }
+  if (!state.model && state.cfg && state.cfg.last_model_path) {
+    const g = state.localGroups.find((x) => x.Files.some((f) => f.Path === state.cfg.last_model_path));
+    if (g) selectModel(state.cfg.last_model_path, g.Name, true);
+  }
+  if (!state.model && state.localGroups.length === 1) {
+    selectModel(state.localGroups[0].Files[0].Path, state.localGroups[0].Name, true);
+  }
+  renderLocalModels();
+  renderPicker();
+}
+$('refresh-local').addEventListener('click', async () => { await loadLocalModels(); toast('Model folders rescanned.'); });
+
+function modelBadges(g) {
+  const q = quantOf(g.Files[0].Path.split(/[\\/]/).pop());
+  const fit = fitOf(g.TotalSize);
+  return [q && badge(q, 'accent'), g.Files.length > 1 && badge(`${g.Files.length} parts`), fit && badge(fit.label, fit.kind)];
+}
+
+function renderLocalModels() {
+  const box = $('local-models');
+  box.textContent = '';
+  $('local-count').textContent = state.localGroups.length ? `${state.localGroups.length} model${state.localGroups.length > 1 ? 's' : ''}` : '';
+  if (state.localGroups.length === 0) {
+    const go = button('Search Hugging Face', () => $('hf-query').focus(), 'btn-primary btn-sm');
+    box.appendChild(empty('No models on this PC yet', 'Download a GGUF model below, or add a folder that has some in Settings.', go));
+    return;
+  }
+  for (const g of state.localGroups) {
+    const path = g.Files[0].Path;
+    const selected = state.model && state.model.path === path;
+    const use = selected
+      ? badge('selected', 'ok')
+      : button('Use this model', () => { selectModel(path, g.Name); showPage('home'); }, 'btn-primary btn-sm');
+    box.appendChild(item({ title: g.Name, badges: modelBadges(g), meta: `${fmtBytes(g.TotalSize)} · ${path}`, actions: [use] }));
   }
 }
-$('refresh-local').addEventListener('click', loadLocalModels);
 
-$('hf-search').addEventListener('click', async () => {
+// Run page picker: the same list as radio-style rows (recognition rather than recall)
+function renderPicker() {
+  const box = $('model-picker');
+  box.textContent = '';
+  if (state.localGroups.length === 0) {
+    box.appendChild(empty('No model yet', 'Download one from Hugging Face to get started.',
+      button('Find a model', () => showPage('models'), 'btn-primary btn-sm')));
+    return;
+  }
+  for (const g of state.localGroups) {
+    const path = g.Files[0].Path;
+    const row = item({ title: g.Name, badges: modelBadges(g), meta: `${fmtBytes(g.TotalSize)} · ${path}`, lead: el('span', 'radio-dot') });
+    row.classList.add('selectable');
+    row.tabIndex = 0;
+    row.setAttribute('role', 'radio');
+    const on = state.model && state.model.path === path;
+    row.setAttribute('aria-checked', on ? 'true' : 'false');
+    if (on) row.classList.add('selected');
+    const pick = () => { if (!on) selectModel(path, g.Name); };
+    row.addEventListener('click', pick);
+    row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
+    box.appendChild(row);
+  }
+  box.setAttribute('role', 'radiogroup');
+  box.setAttribute('aria-label', 'Model');
+}
+
+function selectModel(path, label, quiet) {
+  state.model = { path, label };
+  renderPicker();
+  renderLocalModels();
+  renderHero();
+  if (!quiet) toast(`${label} selected.`);
+  computeTune();
+}
+
+// Hugging Face
+$('hf-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
   const q = $('hf-query').value.trim();
   const box = $('hf-results');
-  box.textContent = 'Searching…';
+  box.replaceChildren(el('div', 'skeleton'));
   try {
     const res = await api('GET', '/api/hf/search?q=' + encodeURIComponent(q));
     box.textContent = '';
-    if (res.length === 0) box.appendChild(el('div', 'hint', 'No results.'));
-    for (const r of res) {
-      box.appendChild(item(r.id, `♥ ${r.likes || 0}`, button('Files', () => {
-        $('hf-repo').value = r.id;
-        $('hf-list-files').click();
-      }, 'secondary')));
+    if (res.length === 0) {
+      box.appendChild(empty('No GGUF models found', 'Try a shorter name, or the repository of the model you want.'));
+      return;
     }
-  } catch (e) {
-    box.textContent = 'Error: ' + e.message;
+    for (const r of res) {
+      box.appendChild(item({
+        title: r.id,
+        badges: [badge(`♥ ${r.likes || 0}`)],
+        actions: [button('Show files', () => listFiles(r.id))],
+      }));
+    }
+  } catch (err) {
+    box.replaceChildren(callout('Search failed: ' + err.message + ' (is the internet reachable?)', 'error'));
   }
 });
-$('hf-query').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('hf-search').click(); });
 
-$('hf-list-files').addEventListener('click', async () => {
+$('hf-repo-form').addEventListener('submit', (e) => {
+  e.preventDefault();
   const repo = $('hf-repo').value.trim();
+  if (repo) listFiles(repo);
+});
+
+async function listFiles(repo) {
+  $('hf-repo').value = repo;
+  const wrap = $('hf-files-wrap');
   const box = $('hf-files');
-  if (!repo) return;
-  box.textContent = 'Loading…';
+  wrap.hidden = false;
+  $('hf-files-title').textContent = repo;
+  box.replaceChildren(el('div', 'skeleton'));
   try {
     const files = await api('GET', '/api/hf/files?repo=' + encodeURIComponent(repo));
     box.textContent = '';
-    if (files.length === 0) box.appendChild(el('div', 'hint', 'No .gguf files in this repo.'));
+    if (files.length === 0) {
+      box.appendChild(empty('No GGUF files here', 'This repository has no .gguf files. Search for a "GGUF" version of the model.'));
+      return;
+    }
     // group split shards so one click fetches the whole model
     const groups = new Map();
     for (const f of files) {
@@ -302,89 +555,219 @@ $('hf-list-files').addEventListener('click', async () => {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(f);
     }
-    for (const [key, fs] of groups) {
-      const size = fs.reduce((a, f) => a + (f.size || 0), 0);
-      const label = fs.length > 1 ? `${key} (${fs.length} shards)` : fs[0].rfilename;
-      box.appendChild(item(label, size ? fmtBytes(size) : '', button('Download', async () => {
-        for (const f of fs) {
-          try { await api('POST', '/api/hf/download', { repo, filename: f.rfilename }); }
-          catch (e) { alert('Download failed to start: ' + e.message); return; }
-        }
-        refreshDownloads();
-      })));
+    const have = new Set(state.localGroups.flatMap((g) => g.Files.map((f) => f.Path.split(/[\\/]/).pop())));
+    for (const [key, fs] of [...groups].sort((a, b) => sizeOf(a[1]) - sizeOf(b[1]))) {
+      const size = sizeOf(fs);
+      const fit = fitOf(size);
+      const name = fs.length > 1 ? key.split('/').pop() : fs[0].rfilename.split('/').pop();
+      const downloaded = fs.every((f) => have.has(f.rfilename.split('/').pop()));
+      const action = downloaded ? badge('on this PC', 'ok') : button('Download', (e) => download(repo, fs, name, e.currentTarget), 'btn-primary btn-sm');
+      box.appendChild(item({
+        title: name,
+        badges: [quantOf(name) && badge(quantOf(name), 'accent'), fs.length > 1 && badge(`${fs.length} parts`), fit && badge(fit.label, fit.kind)],
+        meta: size ? fmtBytes(size) : '',
+        actions: [action],
+      }));
     }
-  } catch (e) {
-    box.textContent = 'Error: ' + e.message;
+    wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (err) {
+    box.replaceChildren(callout(`Could not list files of ${repo}: ${err.message}`, 'error'));
   }
-});
+}
+const sizeOf = (fs) => fs.reduce((a, f) => a + (f.size || 0), 0);
 
+async function download(repo, fs, name, btn) {
+  btn.disabled = true;
+  for (const f of fs) {
+    try {
+      await api('POST', '/api/hf/download', { repo, filename: f.rfilename });
+    } catch (e) {
+      toast(`Download of ${name} failed to start: ${e.message}`, 'error');
+      btn.disabled = false;
+      return;
+    }
+  }
+  btn.textContent = 'Downloading…';
+  toast(`Downloading ${name}. Progress is shown under Downloads.`);
+  refreshDownloads();
+}
+
+const dlSpeed = {}; // key -> {bytes, t, rate}
 let hadActiveDownloads = false;
 async function refreshDownloads() {
+  let list;
+  try { list = await api('GET', '/api/hf/downloads'); } catch (_) { return; }
+  const card = $('downloads-card');
+  card.hidden = list.length === 0;
   const box = $('downloads');
-  try {
-    const list = await api('GET', '/api/hf/downloads');
-    box.textContent = '';
-    if (list.length === 0) box.appendChild(el('div', 'hint', 'No downloads yet.'));
-    list.sort((a, b) => (a.started_at < b.started_at ? 1 : -1));
-    for (const d of list) {
-      const pct = d.total_bytes ? (d.done_bytes / d.total_bytes) * 100 : (d.state === 'done' ? 100 : 0);
-      const bar = el('div', 'progress');
-      const fill = el('div');
-      fill.style.width = pct.toFixed(1) + '%';
-      bar.appendChild(fill);
-      const size = `${fmtBytes(d.done_bytes)}${d.total_bytes ? ' / ' + fmtBytes(d.total_bytes) : ''}`;
-      box.appendChild(item(`${d.repo}/${d.filename}`, `${d.state} — ${size}${d.error ? ' — ' + d.error : ''}`, bar));
+  box.textContent = '';
+  list.sort((a, b) => (a.started_at < b.started_at ? 1 : -1));
+  const now = Date.now();
+  for (const d of list) {
+    const key = d.repo + '/' + d.filename;
+    const pct = d.total_bytes ? (d.done_bytes / d.total_bytes) * 100 : (d.state === 'done' ? 100 : 0);
+    const prev = dlSpeed[key];
+    if (prev && d.state === 'active' && now > prev.t) {
+      const r = (d.done_bytes - prev.bytes) / ((now - prev.t) / 1000);
+      prev.rate = prev.rate ? prev.rate * 0.7 + r * 0.3 : r;
     }
-    const active = list.some((d) => d.state === 'active' || d.state === 'pending');
-    if (hadActiveDownloads && !active) loadLocalModels();
-    hadActiveDownloads = active;
-  } catch (_) { /* transient */ }
+    dlSpeed[key] = { bytes: d.done_bytes, t: now, rate: prev && prev.rate };
+    const rate = dlSpeed[key].rate;
+    let meta = `${fmtBytes(d.done_bytes)}${d.total_bytes ? ' of ' + fmtBytes(d.total_bytes) : ''}`;
+    if (d.state === 'active' && rate > 0) {
+      meta += ` · ${fmtBytes(rate)}/s`;
+      if (d.total_bytes) meta += ` · ${fmtDuration((d.total_bytes - d.done_bytes) / rate)} left`;
+    }
+    if (d.error) meta += ' · ' + d.error;
+    const kinds = { done: 'ok', active: 'accent', pending: '', error: 'bad', failed: 'bad' };
+    const bar = el('div', 'progress dl-progress');
+    const fill = el('div');
+    fill.style.width = pct.toFixed(1) + '%';
+    bar.appendChild(fill);
+    bar.setAttribute('role', 'progressbar');
+    bar.setAttribute('aria-valuenow', pct.toFixed(0));
+    bar.setAttribute('aria-label', d.filename);
+    box.appendChild(item({
+      title: d.filename.split('/').pop(),
+      badges: [badge(d.state === 'active' ? `${pct.toFixed(0)}%` : d.state, kinds[d.state])],
+      meta: `${d.repo} · ${meta}`,
+      actions: [d.state === 'active' || d.state === 'pending' ? bar : null],
+    }));
+  }
+  const active = list.some((d) => d.state === 'active' || d.state === 'pending');
+  if (hadActiveDownloads && !active) {
+    const failed = list.filter((d) => d.error);
+    toast(failed.length ? `${failed.length} download(s) failed; see Models.` : 'Download finished. The model is ready to use.', failed.length ? 'error' : 'ok');
+    loadLocalModels();
+  }
+  hadActiveDownloads = active;
 }
 setInterval(refreshDownloads, 1500);
 
-// ---- run ------------------------------------------------------------------
+// ---- run: mode ------------------------------------------------------------
 
-function selectModel(path, label, quiet) {
-  state.model = { path, label };
-  $('selected-model').textContent = `${label}\n${path}`;
-  if (!quiet) showTab('run');
-  computeTune();
+function setMode(mode) {
+  state.mode = mode;
+  document.body.classList.toggle('mode-single', mode !== 'ondemand');
+  document.body.classList.toggle('mode-ondemand', mode === 'ondemand');
+  document.querySelectorAll('.seg-btn').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.mode === mode)));
+  renderHero();
+  renderGPUs();
 }
 
+document.querySelectorAll('.seg-btn').forEach((b) => b.addEventListener('click', async () => {
+  const mode = b.dataset.mode;
+  if (mode === state.mode) return;
+  const cfg = JSON.parse(JSON.stringify(state.cfg));
+  cfg.on_demand = mode === 'ondemand';
+  try { await saveConfig(cfg); } catch (e) { toast(e.message, 'error'); return; }
+  setMode(mode);
+  if (state.status.Running && state.status.OnDemand !== cfg.on_demand) {
+    toast('The new mode applies after Stop and Start.', 'warn');
+  }
+}));
+// arrow keys move between the two options, like native radio buttons
+document.querySelector('.seg').addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const btns = [...document.querySelectorAll('.seg-btn')];
+  const next = btns.find((b) => b.dataset.mode !== state.mode);
+  next.click();
+  next.focus();
+});
+
+// ---- run: plan ------------------------------------------------------------
+
+let tuneSeq = 0;
 async function computeTune() {
-  const out = $('tune-plan');
+  const out = $('plan');
   if (!state.model) return;
-  out.textContent = 'Reading model and computing plan…';
+  const seq = ++tuneSeq;
+  out.replaceChildren(el('div', 'skeleton'));
   try {
     const resp = await api('POST', '/api/tune', { model_path: state.model.path });
+    if (seq !== tuneSeq) return;
     state.plan = resp;
-    const p = resp.plan;
-    const lines = [];
-    if (p.Devices && p.Devices.length) {
-      p.Devices.forEach((d, i) => {
-        const layers = p.TensorSplit ? ` — ${p.TensorSplit[i]} slot(s)` : '';
-        lines.push(`GPU ${d} ${p.DeviceNames[i]}: ${fmtBytes(p.DeviceBytes[i])}${layers}`);
-      });
-    }
-    lines.push(`GPU layers: ${p.NGpuLayers}` + (p.NCPUMoE ? `, experts of the first ${p.NCPUMoE} blocks in CPU RAM` : ''));
-    lines.push(`context: ${p.CtxSize} tokens, KV cache ${p.CacheTypeKV}, ${p.Parallel} slot(s)`);
-    lines.push(`reasoning controls: ${resp.reasoning}`);
-    lines.push(`on GPU ${fmtBytes(p.GPUFitBytes)} · in RAM ${fmtBytes(p.CPUFitBytes)} · total ${fmtBytes(p.TotalBytes)}`);
-    (p.Notes || []).forEach((n) => lines.push('• ' + n));
-    out.textContent = lines.join('\n');
     $('tune-args').value = joinArgs(resp.args);
+    renderPlan();
+    renderGPUs();
   } catch (e) {
-    out.textContent = 'Error: ' + e.message;
+    if (seq !== tuneSeq) return;
+    state.plan = null;
+    out.replaceChildren(callout('Could not read this model: ' + e.message, 'error'));
   }
 }
 $('retune').addEventListener('click', computeTune);
 
+function renderPlan() {
+  const out = $('plan');
+  const p = state.plan.plan;
+  out.textContent = '';
+
+  // one line in plain words first, details after (progressive disclosure)
+  let summary;
+  if (p.FullyOnGPU) summary = 'Everything fits on the GPU: fastest setup.';
+  else if (!p.Devices || !p.Devices.length || p.NGpuLayers === 0) summary = 'Runs on the CPU only.';
+  else if (p.NCPUMoE > 0 && p.NGpuLayers >= p.NCPUMoE) summary = `Most of the model runs on the GPU; the experts of ${p.NCPUMoE} layer${p.NCPUMoE > 1 ? 's' : ''} stay in RAM.`;
+  else summary = 'Split between GPU and CPU: expect slower answers.';
+  out.appendChild(callout(summary, p.NGpuLayers === 0 && state.gpus.length ? 'warn' : 'info'));
+
+  if (p.Devices && p.Devices.length) {
+    const devs = el('div', 'plan-devices');
+    p.Devices.forEach((d, i) => {
+      const g = state.gpus.find((x) => x.Index === d);
+      const total = g ? g.TotalBytes : 0;
+      const box = el('div', 'plan-dev');
+      const name = el('div', 'plan-dev-name');
+      name.append(el('span', '', p.DeviceNames[i] || `GPU ${d}`), el('span', 'muted', fmtBytes(p.DeviceBytes[i])));
+      box.appendChild(name);
+      if (total) {
+        const m = el('div', 'meter');
+        const bar = el('span', 'm-model');
+        bar.style.width = Math.min(100, p.DeviceBytes[i] / total * 100) + '%';
+        m.appendChild(bar);
+        box.appendChild(m);
+      }
+      box.appendChild(el('div', 'muted small', p.TensorSplit ? `${p.TensorSplit[i]} layer slot(s)` : `${p.NGpuLayers} layer slot(s)`));
+      devs.appendChild(box);
+    });
+    out.appendChild(devs);
+  }
+
+  const facts = el('div', 'facts');
+  const fact = (k, v) => { const f = el('span', 'fact'); f.append(el('b', '', k + ' '), document.createTextNode(v)); facts.appendChild(f); };
+  fact('Context', `${Number(p.CtxSize).toLocaleString()} tokens`);
+  fact('On GPU', fmtBytes(p.GPUFitBytes));
+  fact('In RAM', fmtBytes(p.CPUFitBytes));
+  fact('KV cache', p.CacheTypeKV);
+  if (p.Parallel > 1) fact('Parallel', p.Parallel);
+  fact('Thinking control', state.plan.reasoning || 'none');
+  out.appendChild(facts);
+
+  const notes = (p.Notes || []).filter(Boolean);
+  if (notes.length) {
+    const box = el('div', 'notes');
+    for (const n of notes) {
+      const bad = /^warning|too small|too large|very slow|can't hold/i.test(n);
+      const warn = /slow|close other|missing|unavailable/i.test(n);
+      box.appendChild(callout(n, bad ? 'error' : warn ? 'warn' : 'info'));
+    }
+    out.appendChild(box);
+  }
+}
+
+// ---- run: start / stop / status ---------------------------------------------
+
 $('start-server').addEventListener('click', async () => {
+  const btn = $('start-server');
+  if (state.mode !== 'ondemand' && !state.model) {
+    toast('Choose a model first.', 'warn');
+    return;
+  }
+  btn.disabled = true;
   try {
     if (state.mode === 'ondemand') {
       await api('POST', '/api/server/start', { on_demand: true });
     } else {
-      if (!state.model) { alert('Pick a model in the Models tab first.'); return; }
       await api('POST', '/api/server/start', {
         model_path: state.model.path,
         args: splitArgs($('tune-args').value),
@@ -392,143 +775,162 @@ $('start-server').addEventListener('click', async () => {
       });
     }
     $('server-log').textContent = '';
-    refreshServerStatus();
+    state.wasReady = false;
+    await refreshServerStatus();
   } catch (e) {
-    alert('Failed to start: ' + e.message);
+    toast('Could not start: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
   }
 });
 
-// ---- mode (single / on-demand) --------------------------------------------
+$('stop-server').addEventListener('click', async () => {
+  try { await api('POST', '/api/server/stop'); toast('Model stopped. Its memory is free again.'); }
+  catch (e) { toast('Could not stop: ' + e.message, 'error'); }
+  refreshServerStatus();
+});
 
-function setMode(mode) {
-  state.mode = mode;
-  document.body.classList.toggle('mode-single', mode !== 'ondemand');
-  document.body.classList.toggle('mode-ondemand', mode === 'ondemand');
-  document.querySelectorAll('input[name=run-mode]').forEach((r) => { r.checked = r.value === mode; });
+const openChat = () => api('POST', '/api/open').catch((e) => toast(e.message, 'error'));
+$('open-webui').addEventListener('click', openChat);
+$('side-chat').addEventListener('click', openChat);
+
+$('copy-api').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('api-url').textContent); toast('API address copied.', 'ok', 2000); }
+  catch (_) { toast('Copy failed; select the address and copy it manually.', 'warn'); }
+});
+
+$('quit').addEventListener('click', async () => {
+  const running = state.status.Running;
+  if (!(await confirmDialog('Quit Q38FNInference?', running ? 'The running model will be stopped and API clients disconnected.' : 'The app and its API will close.', 'Quit', true))) return;
+  try { await api('POST', '/api/quit'); } catch (_) {}
+  document.body.innerHTML = '<div class="exited"><div><h1>Q38FNInference has closed</h1><p>You can close this window. Start the app again to reopen it.</p></div></div>';
+});
+
+async function refreshServerStatus() {
+  let st;
+  try { st = await api('GET', '/api/server/status'); } catch (_) { return; }
+  state.status = st;
+  if (st.Ready && !state.wasReady && st.Running) {
+    toast(st.OnDemand ? 'Server ready. Models load on first request.' : 'Model loaded and ready.', 'ok');
+  }
+  state.wasReady = st.Running && st.Ready;
+  if (st.OnDemand && st.Ready) refreshRouterModels();
+  renderHero();
+}
+setInterval(refreshServerStatus, 1500);
+
+function runningModelName(st) {
+  if (st.OnDemand) return 'All local models (on demand)';
+  const i = (st.Args || []).indexOf('--model');
+  const path = i >= 0 ? st.Args[i + 1] : '';
+  const g = state.localGroups.find((x) => x.Files.some((f) => f.Path === path));
+  return g ? g.Name : path.split(/[\\/]/).pop() || 'model';
 }
 
-document.querySelectorAll('input[name=run-mode]').forEach((r) => r.addEventListener('change', async () => {
-  const cfg = JSON.parse(JSON.stringify(state.cfg));
-  cfg.on_demand = r.value === 'ondemand';
-  try { await saveConfig(cfg); } catch (e) { alert(e.message); }
-  setMode(r.value);
-  if (state.running && state.runningOnDemand !== cfg.on_demand) {
-    $('server-status').textContent = 'mode changes apply after Stop / Start';
+// one place decides what the status looks like, used by the hero and the sidebar
+function renderHero() {
+  const st = state.status || {};
+  let dot = '', title, detail, side;
+  if (st.Running && st.Ready) {
+    dot = 'ok'; title = st.OnDemand ? 'Serving on demand' : 'Ready';
+    detail = st.OnDemand ? 'Requests load the model they name.' : `${runningModelName(st)} is answering requests.`;
+    side = 'Ready';
+  } else if (st.Running) {
+    dot = 'busy'; title = st.OnDemand ? 'Starting the server…' : 'Loading the model…';
+    const secs = st.StartedAt ? (Date.now() - Date.parse(st.StartedAt)) / 1000 : 0;
+    detail = `${runningModelName(st)} · ${fmtDuration(secs)}${state.lastLog ? ' · ' + state.lastLog.slice(0, 90) : ''}`;
+    side = 'Loading…';
+  } else if (st.ExitErr) {
+    dot = 'bad'; title = 'The model stopped unexpectedly';
+    detail = st.ExitErr + '. The server log below has the details.';
+    side = 'Stopped (error)';
+  } else {
+    title = 'Ready to start';
+    detail = state.mode === 'ondemand' ? 'Start to offer every local model through the API.'
+      : state.model ? state.model.label : 'Choose a model below.';
+    side = 'Stopped';
   }
-}));
+  $('hero-dot').className = 'dot dot-lg ' + dot;
+  $('hero-title').textContent = title;
+  $('hero-detail').textContent = detail;
+  $('hero-progress').hidden = !(st.Running && !st.Ready);
+  $('start-server').hidden = !!st.Running;
+  $('stop-server').hidden = !st.Running;
+  $('open-webui').disabled = !st.Ready;
+  $('bench-run').disabled = !st.Ready;
+
+  $('side-dot').className = 'dot ' + dot;
+  $('side-state').textContent = side;
+  $('side-model').textContent = st.Running ? runningModelName(st) : 'No model running';
+  $('side-chat').disabled = !st.Ready;
+  if (st.ExitErr && !st.Running) $('log-card').open = true;
+  document.title = (st.Ready ? '● ' : st.Running ? '○ ' : '') + 'Q38FNInference';
+}
+
+// ---- run: on-demand models ------------------------------------------------
 
 $('idle-unload').addEventListener('change', async () => {
   const cfg = JSON.parse(JSON.stringify(state.cfg));
   cfg.idle_unload_minutes = Math.max(0, parseInt($('idle-unload').value, 10) || 0);
-  try { await saveConfig(cfg); } catch (e) { alert(e.message); }
+  try { await saveConfig(cfg); toast('Saved. Applies on the next start.', 'ok', 2500); } catch (e) { toast(e.message, 'error'); }
 });
 
 async function refreshRouterModels() {
   const box = $('router-models');
   let list;
-  try {
-    list = (await api('GET', '/models')).data || [];
-  } catch (e) {
-    return; // router still starting
-  }
+  try { list = (await api('GET', '/models')).data || []; } catch (_) { return; }
   box.textContent = '';
-  if (list.length === 0) box.appendChild(el('div', 'hint', 'No models found — download one in the Models tab.'));
+  if (list.length === 0) {
+    box.appendChild(empty('No models to offer', 'Download a model and it will appear here.', button('Find a model', () => showPage('models'), 'btn-primary btn-sm')));
+  }
   for (const m of list) {
     const st = m.status || {};
     const status = st.value || 'unknown';
     const failed = st.failed && status === 'unloaded';
-    const pill = el('span', 'pill ' + (failed ? 'failed' : status),
-      failed ? `load failed${st.exit_code != null ? ' (exit ' + st.exit_code + ')' : ''} — see log` : status);
+    const kinds = { loaded: 'ok', loading: 'warn', sleeping: '', unloaded: '', downloading: 'warn' };
+    const b = failed ? badge(`failed${st.exit_code != null ? ' (exit ' + st.exit_code + ')' : ''}`, 'bad') : badge(status, kinds[status]);
     const busy = status === 'loading' || status === 'downloading';
     const loaded = status === 'loaded' || status === 'sleeping';
     const btn = loaded
-      ? button('Unload', () => routerAction('unload', m.id), 'secondary')
-      : button('Load', () => routerAction('load', m.id));
+      ? button('Unload', () => routerAction('unload', m.id))
+      : button('Load', () => routerAction('load', m.id), 'btn-primary btn-sm');
     btn.disabled = busy;
-    box.appendChild(item(m.id, m.path || '', pill, btn));
+    box.appendChild(item({ title: m.id, badges: [b], meta: failed ? 'Could not load; see the server log.' : '', actions: [btn] }));
   }
-  try {
-    const n = (await api('GET', '/api/router/notes')).notes;
-    $('router-notes').textContent = n.length ? 'Notes:\n' + n.join('\n') : '';
-  } catch (_) { /* optional */ }
-  const sel = $('chat-model');
+  const sel = $('bench-model');
   const current = sel.value;
-  sel.textContent = '';
-  for (const m of list) {
-    const o = el('option', '', m.id);
-    o.value = m.id;
-    sel.appendChild(o);
-  }
+  sel.replaceChildren(...list.map((m) => { const o = el('option', '', m.id); o.value = m.id; return o; }));
   const loadedOne = list.find((m) => m.status && m.status.value === 'loaded');
   sel.value = list.some((m) => m.id === current) ? current : (loadedOne ? loadedOne.id : (list[0] || {}).id || '');
+  try {
+    const n = (await api('GET', '/api/router/notes')).notes;
+    const nb = $('router-notes');
+    nb.hidden = !n.length;
+    if (n.length) nb.replaceChildren(icon('info'), el('div', '', 'Not offered:\n' + n.join('\n')));
+  } catch (_) { /* optional */ }
 }
 
 async function routerAction(action, model) {
   try {
     await api('POST', '/models/' + action, { model });
+    toast(action === 'load' ? `Loading ${model}…` : `${model} unloaded.`);
   } catch (e) {
-    alert(`${action} failed: ${e.message}`);
+    toast(`Could not ${action} ${model}: ${e.message}`, 'error');
   }
   refreshRouterModels();
 }
 
 $('router-rescan').addEventListener('click', async () => {
   try {
-    const r = await api('POST', '/api/router/rescan');
-    $('router-notes').textContent = r.notes.length ? 'Not offered:\n' + r.notes.join('\n') : '';
+    await api('POST', '/api/router/rescan');
+    toast('Rescanning model folders…');
     setTimeout(refreshRouterModels, 1500);
   } catch (e) {
-    $('router-notes').textContent = e.message;
+    toast(e.message, 'error');
   }
 });
 
-$('stop-server').addEventListener('click', async () => {
-  try { await api('POST', '/api/server/stop'); } catch (e) { alert('Failed to stop: ' + e.message); }
-  refreshServerStatus();
-});
-
-$('open-webui').addEventListener('click', () => api('POST', '/api/open').catch(() => {}));
-
-$('quit').addEventListener('click', async () => {
-  if (!confirm('Stop the model and exit Q38FNInference?')) return;
-  try { await api('POST', '/api/quit'); } catch (_) {}
-  document.body.innerHTML = '<main><div class="panel"><h2>Q38FNInference has exited.</h2><p class="hint">You can close this tab.</p></div></main>';
-});
-
-async function refreshServerStatus() {
-  try {
-    const st = await api('GET', '/api/server/status');
-    const pill = $('hdr-status');
-    let label = 'stopped';
-    if (st.Running) label = st.Ready ? 'ready' : 'loading';
-    pill.textContent = label;
-    pill.className = 'pill ' + (st.Running ? label : '');
-    $('server-status').textContent = st.Running ? `${label} (pid ${st.PID})` : (st.ExitErr ? 'exited: ' + st.ExitErr : '');
-    state.running = st.Running;
-    state.runningOnDemand = st.OnDemand;
-    if (st.OnDemand && st.Ready) refreshRouterModels();
-    $('start-server').disabled = st.Running;
-    $('stop-server').disabled = !st.Running;
-    $('open-webui').disabled = !st.Ready;
-    $('bench-run').disabled = !st.Ready;
-    $('chat-send').disabled = !st.Ready;
-  } catch (_) { /* transient */ }
-}
-setInterval(refreshServerStatus, 1500);
-
-function streamLogs() {
-  const box = $('server-log');
-  const es = new EventSource('/api/server/logs/stream');
-  es.onmessage = (ev) => {
-    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
-    box.textContent += JSON.parse(ev.data) + '\n';
-    if (box.textContent.length > 400000) box.textContent = box.textContent.slice(-300000);
-    if (atBottom) box.scrollTop = box.scrollHeight;
-  };
-  es.onerror = () => { es.close(); setTimeout(streamLogs, 2000); };
-}
-
-// ---- benchmark --------------------------------------------------------------
+// ---- speed test -------------------------------------------------------------
 
 // the launch settings that matter for speed, pulled from the running args
 function speedSettings(args) {
@@ -545,131 +947,74 @@ function speedSettings(args) {
 $('bench-run').addEventListener('click', async () => {
   const btn = $('bench-run');
   btn.disabled = true;
-  $('bench-status').textContent = 'running… (a large model can take a minute)';
+  $('bench-status').textContent = 'Running… a large model can take a minute.';
   try {
-    const st = await api('GET', '/api/server/status');
-    const body = st.OnDemand ? { model: $('chat-model').value } : {};
+    const st = state.status;
+    const body = st.OnDemand ? { model: $('bench-model').value } : {};
     const r = await api('POST', '/api/benchmark', body);
-    const settings = st.OnDemand ? 'on-demand (see presets)' : speedSettings(st.Args || []);
     const tr = document.createElement('tr');
     for (const [v, cls] of [
       [new Date().toLocaleTimeString(), ''],
-      [r.model || '', ''],
-      [`${r.prompt_per_second.toFixed(1)} (${r.prompt_tokens} tok)`, 'num'],
-      [`${r.generated_per_second.toFixed(2)} (${r.generated_tokens} tok)`, 'num'],
-      [settings, 'args'],
-    ]) {
-      const td = el('td', cls, v);
-      tr.appendChild(td);
-    }
-    $('bench-table').querySelector('tbody').prepend(tr);
-    $('bench-table').hidden = false;
-    $('bench-status').textContent = `done in ${r.wall_seconds.toFixed(1)} s`;
+      [r.model || runningModelName(st), ''],
+      [`${r.prompt_per_second.toFixed(0)} tok/s`, 'num'],
+      [`${r.generated_per_second.toFixed(1)} tok/s`, 'num'],
+      [st.OnDemand ? 'on demand' : speedSettings(st.Args || []), 'args'],
+    ]) tr.appendChild(el('td', cls, v));
+    $('bench-body').prepend(tr);
+    $('bench-wrap').hidden = false;
+    $('bench-status').textContent = `Done in ${r.wall_seconds.toFixed(1)} s.`;
   } catch (e) {
-    $('bench-status').textContent = 'failed: ' + e.message;
+    $('bench-status').textContent = '';
+    toast('Speed test failed: ' + e.message, 'error');
   } finally {
-    btn.disabled = false;
+    btn.disabled = !state.status.Ready;
   }
 });
 
-// ---- chat -----------------------------------------------------------------
+// ---- log --------------------------------------------------------------------
 
-function renderChat() {
-  const log = $('chat-log');
-  log.textContent = '';
-  for (const m of state.chat) {
-    const div = el('div', 'msg ' + m.role);
-    if (m.reasoning) div.appendChild(el('div', 'think', m.reasoning));
-    div.appendChild(document.createTextNode(m.content || (m.role === 'assistant' && !m.done ? '…' : '')));
-    log.appendChild(div);
-  }
-  log.scrollTop = log.scrollHeight;
+function streamLogs() {
+  const box = $('server-log');
+  const es = new EventSource('/api/server/logs/stream');
+  es.onmessage = (ev) => {
+    const line = JSON.parse(ev.data);
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    box.textContent += line + '\n';
+    if (box.textContent.length > 400000) box.textContent = box.textContent.slice(-300000);
+    if (atBottom) box.scrollTop = box.scrollHeight;
+    const clean = line.replace(/^\S+:\s*/, '').trim();
+    if (clean) { state.lastLog = clean; $('log-last').textContent = clean; }
+  };
+  es.onerror = () => { es.close(); setTimeout(streamLogs, 2000); };
 }
-
-async function sendChat() {
-  const text = $('chat-input').value.trim();
-  if (!text || state.abort) return;
-  $('chat-input').value = '';
-  state.chat.push({ role: 'user', content: text });
-  const reply = { role: 'assistant', content: '', reasoning: '' };
-  state.chat.push(reply);
-  renderChat();
-
-  const stream = $('chat-stream').checked;
-  const messages = state.chat.filter((m) => m !== reply && m.role !== 'error').map((m) => ({ role: m.role, content: m.content }));
-  state.abort = new AbortController();
-  try {
-    const resp = await fetch('/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign({ messages, stream },
-        state.runningOnDemand && $('chat-model').value ? { model: $('chat-model').value } : {})),
-      signal: state.abort.signal,
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error((err.error && (err.error.message || err.error)) || resp.statusText);
-    }
-    if (!stream) {
-      const data = await resp.json();
-      const msg = data.choices[0].message;
-      reply.content = msg.content || '';
-      reply.reasoning = msg.reasoning_content || '';
-    } else {
-      const reader = resp.body.getReader();
-      const dec = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let i;
-        while ((i = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, i).trim();
-          buf = buf.slice(i + 1);
-          if (!line.startsWith('data:')) continue;
-          const payload = line.slice(5).trim();
-          if (payload === '[DONE]') continue;
-          const delta = (JSON.parse(payload).choices[0] || {}).delta || {};
-          if (delta.content) reply.content += delta.content;
-          if (delta.reasoning_content) reply.reasoning += delta.reasoning_content;
-          renderChat();
-        }
-      }
-    }
-  } catch (e) {
-    if (e.name !== 'AbortError') state.chat.push({ role: 'error', content: 'Error: ' + e.message });
-  } finally {
-    reply.done = true;
-    state.abort = null;
-    renderChat();
-  }
-}
-
-$('chat-send').addEventListener('click', sendChat);
-$('chat-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+$('log-copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('server-log').textContent); toast('Log copied.', 'ok', 2000); }
+  catch (_) { toast('Copy failed.', 'warn'); }
 });
-$('chat-stop').addEventListener('click', () => state.abort && state.abort.abort());
-$('chat-clear').addEventListener('click', () => { state.chat = []; renderChat(); });
+$('log-clear').addEventListener('click', () => { $('server-log').textContent = ''; });
 
-// ---- init -----------------------------------------------------------------
+// ---- init -------------------------------------------------------------------
 
 (async function init() {
+  showPage(location.hash.slice(1) || 'home');
   try {
     state.cfg = await api('GET', '/api/config');
     fillForm(state.cfg);
     setMode(state.cfg.on_demand ? 'ondemand' : 'single');
     $('idle-unload').value = state.cfg.idle_unload_minutes || 0;
-    renderSystemHint();
-    const info = await api('GET', '/api/info');
-    $('api-url').textContent = info.api_url + '/v1';
-    $('api-error').textContent = info.api_error || '';
   } catch (e) {
-    $('settings-status').textContent = 'Error loading settings: ' + e.message;
+    toast('Could not load settings: ' + e.message, 'error');
   }
-  loadGPUs();
-  loadLocalModels();
+  try {
+    state.info = await api('GET', '/api/info');
+    $('api-url').textContent = state.info.api_url + '/v1';
+    if (state.info.api_error) {
+      $('api-error').hidden = false;
+      $('api-error').replaceChildren(icon('error'), el('div', '', 'The API port could not be opened: ' + state.info.api_error + '. Change the port in Settings and restart the app.'));
+    }
+  } catch (_) { /* shown by other calls */ }
+  await loadGPUs();
+  await loadLocalModels();
   refreshDownloads();
   refreshServerStatus();
   streamLogs();

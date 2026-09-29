@@ -71,6 +71,9 @@ func TestStop(t *testing.T) {
 	if m.Status().Running {
 		t.Fatal("Status().Running should be false after StopWithTimeout")
 	}
+	if e := m.Status().ExitErr; e != "" {
+		t.Errorf("ExitErr = %q after a requested stop, want empty (not a crash)", e)
+	}
 }
 
 func TestSubscribeReceivesNewLines(t *testing.T) {
