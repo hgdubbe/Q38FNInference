@@ -92,3 +92,15 @@ func TestModelSettingsEnv(t *testing.T) {
 		t.Errorf("Env() = %v", got)
 	}
 }
+
+func TestModelForUsesOverride(t *testing.T) {
+	c := Default()
+	c.Model.CtxSize = 8192
+	c.ModelOverrides = map[string]ModelSettings{"big": {CtxSize: 32768}}
+	if got := c.ModelFor("big").CtxSize; got != 32768 {
+		t.Errorf("override: ctx %d, want 32768", got)
+	}
+	if got := c.ModelFor("other").CtxSize; got != 8192 {
+		t.Errorf("default: ctx %d, want 8192", got)
+	}
+}

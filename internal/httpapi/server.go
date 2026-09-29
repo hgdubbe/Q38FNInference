@@ -435,7 +435,7 @@ func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU) (*tuneResponse, e
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", modelPath, err)
 	}
-	ms := s.Config().Model
+	ms := s.Config().ModelFor(modelName(modelPath))
 	plan, err := tuning.Compute(meta, gpus, tuning.Options{
 		ExtraReserve: s.extraReserve(modelPath, gpus),
 		RequestedCtx: ms.CtxSize,
@@ -631,7 +631,7 @@ func (s *Server) launch(modelPath string, args []string, devices []int, auto, re
 	}
 	args = append(stripFlags(args, "--host", "--port"), "--host", "127.0.0.1", "--port", strconv.Itoa(port))
 
-	env := append([]string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}, cfg.Model.Env()...)
+	env := append([]string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}, cfg.ModelFor(modelName(modelPath)).Env()...)
 	if len(devices) > 0 {
 		ids := make([]string, len(devices))
 		for i, d := range devices {

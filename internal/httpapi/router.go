@@ -129,7 +129,7 @@ func (s *Server) planFor(rt *routerRun, path string) (*tuneResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	settings, _ := json.Marshal(s.Config().Model)
+	settings, _ := json.Marshal(s.Config().ModelFor(modelName(path)))
 	key := fmt.Sprintf("%s|%d|%d|%s", path, fi.Size(), fi.ModTime().UnixNano(), settings)
 
 	rt.mu.Lock()

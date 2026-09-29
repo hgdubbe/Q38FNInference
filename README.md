@@ -12,7 +12,7 @@ build of `ggml-org/llama.cpp`'s `llama-server`.
   one or several GPUs (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 - Common model settings: context, KV cache type, sampling (temperature,
   top-p/k, min-p, penalties, seed, max tokens), reasoning, threads, batch
-  sizes, API key, extra llama-server arguments.
+  sizes, API key, extra llama-server arguments; as defaults, or per model.
 - Reasoning level (off/low/medium/high), translated per model from its
   chat template: on/off switches, effort levels, or a thinking-token budget.
 - System prompt override, applied to every chat request (default-only or
@@ -53,7 +53,9 @@ models go to `%APPDATA%\Q38FNInference\models`.
    the address copies it).
 4. **Settings**: system prompt (with presets), thinking level and sampling,
    performance options (folded away by default), API port, network access
-   and key. Changes show a save bar until saved.
+   and key. Changes show a save bar until saved. "Settings for" switches
+   between the defaults and one model's own settings (also reachable from
+   the Run page's "Its settings" link).
 
 ## API
 
@@ -77,7 +79,7 @@ In **on-demand mode** (Run tab) llama-server runs as a router:
 
 Model ids are the file names without shard suffix or `.gguf` (e.g.
 `RVN-Qwen3.8-Flash-Next-IQ4_XS`). Each model loads with its own offload plan
-and the Settings → Model options. The list is rescanned every 30 seconds, so
+and its settings (its own, or the defaults). The list is rescanned every 30 seconds, so
 new downloads (from the Models tab, another tool, or `POST /models`) appear
 without a restart. With "Unload after idle" set, a model that gets no
 requests for that long is unloaded and reloads on the next request.

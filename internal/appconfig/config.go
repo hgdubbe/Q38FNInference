@@ -59,6 +59,18 @@ type Config struct {
 	IdleUnloadMinutes int `json:"idle_unload_minutes,omitempty"`
 
 	Model ModelSettings `json:"model"`
+	// ModelOverrides replaces Model for single models, keyed by model id
+	// (file name without shard suffix and ".gguf", as the API reports it).
+	ModelOverrides map[string]ModelSettings `json:"model_overrides,omitempty"`
+}
+
+// ModelFor returns the settings a model runs with: its own, if it has
+// any, else the shared defaults.
+func (c Config) ModelFor(id string) ModelSettings {
+	if ms, ok := c.ModelOverrides[id]; ok {
+		return ms
+	}
+	return c.Model
 }
 
 // ModelSettings are llama-server load/sampling options. Zero values and nil

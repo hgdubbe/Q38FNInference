@@ -8,6 +8,7 @@ const state = {
   cfg: null,
   info: {},
   model: null,        // { path, label } chosen for single mode
+  scope: '',          // Settings page: '' = defaults, else a model id
   localGroups: [],
   plan: null,         // last /api/tune response
   gpus: [],
@@ -249,7 +250,77 @@ function setPath(obj, path, v) {
   if (v === undefined) delete target[last]; else target[last] = v;
 }
 
+// Settings apply either to all models (the defaults) or to one model
+// (state.scope, a model id): config.model_overrides[id] replaces
+// config.model for that model. The form always edits the "model.*" fields;
+// scopeView maps them onto the scope's settings.
+function modelId(path) {
+  return path.split(/[\\/]/).pop().replace(/(-\d{5}-of-\d{5})?\.gguf$/i, '');
+}
+function hasOverride(cfg, id) {
+  return !!(id && cfg && cfg.model_overrides && cfg.model_overrides[id]);
+}
+function scopeView(cfg) {
+  if (!state.scope || !hasOverride(cfg, state.scope)) return cfg;
+  return { ...cfg, model: cfg.model_overrides[state.scope] };
+}
+
+function applyScope() {
+  const m = !!state.scope;
+  const own = m && $('scope-custom').checked;
+  document.querySelectorAll('#settings-form .global-only').forEach((e) => { e.hidden = m; });
+  $('scope-custom-row').hidden = !m;
+  for (const f of form.elements) {
+    if (f.name && f.name.startsWith('model.')) f.disabled = m && !own;
+  }
+  $('scope-note').textContent = !m
+    ? 'Used by every model that has no settings of its own.'
+    : (own ? `Only for ${state.scope}.` : `${state.scope} follows the defaults.`)
+      + ' In on-demand mode, the API key, GPU prompt offload and block attention always come from the defaults.';
+}
+
+function renderScope() {
+  const sel = $('settings-scope');
+  const ids = [...new Set(state.localGroups.map((g) => modelId(g.Files[0].Path)))];
+  const gone = Object.keys((state.cfg && state.cfg.model_overrides) || {}).filter((id) => !ids.includes(id));
+  if (state.scope && !ids.includes(state.scope) && !gone.includes(state.scope)) gone.push(state.scope);
+  sel.replaceChildren(new Option('All models (defaults)', ''));
+  for (const id of ids) sel.add(new Option(id + (hasOverride(state.cfg, id) ? ' · own settings' : ''), id));
+  for (const id of gone) sel.add(new Option(id + ' · not found', id));
+  sel.value = state.scope || '';
+}
+
+async function setScope(id) {
+  if (id === state.scope) return true;
+  if (formDirty() && !(await confirmDialog('Discard unsaved changes?', 'The settings you changed have not been saved.', 'Discard', true))) {
+    $('settings-scope').value = state.scope || '';
+    return false;
+  }
+  state.scope = id;
+  renderScope();
+  fillForm(state.cfg);
+  return true;
+}
+$('settings-scope').addEventListener('change', (e) => setScope(e.target.value));
+$('scope-custom').addEventListener('change', () => {
+  // unticked: show the defaults again; ticked: start from them
+  if (!$('scope-custom').checked) fillFields(state.cfg);
+  applyScope();
+  updateSavebar();
+});
+$('model-settings-link').addEventListener('click', async () => {
+  if (!state.model) { toast('Choose a model first.'); return; }
+  if (await setScope(modelId(state.model.path))) showPage('settings');
+});
+
 function fillForm(cfg) {
+  $('scope-custom').checked = hasOverride(cfg, state.scope);
+  fillFields(scopeView(cfg));
+  applyScope();
+  updateSavebar();
+}
+
+function fillFields(cfg) {
   for (const f of form.elements) {
     if (!f.name) continue;
     const v = getPath(cfg, f.name);
@@ -263,11 +334,10 @@ function fillForm(cfg) {
       f.value = v != null && v !== '' && ok ? v : def.value;
     } else f.value = v == null ? '' : v;
   }
-  updateSavebar();
 }
 
 function readForm() {
-  const cfg = JSON.parse(JSON.stringify(state.cfg || {}));
+  const cfg = JSON.parse(JSON.stringify(scopeView(state.cfg || {})));
   cfg.model = cfg.model || {};
   for (const f of form.elements) {
     if (!f.name) continue;
@@ -280,16 +350,23 @@ function readForm() {
     if (f.name === 'system_prompt' && v !== undefined) v = f.value; // keep formatting
     setPath(cfg, f.name, v);
   }
-  return cfg;
+  if (!state.scope) return cfg;
+  // one model: only its entry in model_overrides changes
+  const out = JSON.parse(JSON.stringify(state.cfg));
+  out.model_overrides = out.model_overrides || {};
+  if ($('scope-custom').checked) out.model_overrides[state.scope] = cfg.model;
+  else delete out.model_overrides[state.scope];
+  return out;
 }
 
 // compare only what the form edits, so values changed elsewhere (GPUs, mode) don't count
 function formDirty() {
   if (!state.cfg) return false;
-  const a = readForm();
+  if (state.scope && $('scope-custom').checked !== hasOverride(state.cfg, state.scope)) return true;
+  const a = scopeView(readForm()), b = scopeView(state.cfg);
   for (const f of form.elements) {
     if (!f.name || (f.type === 'radio' && !f.checked)) continue;
-    const x = getPath(a, f.name), y = getPath(state.cfg, f.name);
+    const x = getPath(a, f.name), y = getPath(b, f.name);
     const norm = (v) => (v === undefined || v === null || v === '' || v === false || (Array.isArray(v) && !v.length) ? '' : JSON.stringify(v));
     if (f.type === 'radio' && (y || 'off') === x) continue;
     if (norm(x) !== norm(y)) return true;
@@ -317,6 +394,8 @@ form.addEventListener('submit', async (e) => {
   try {
     await saveConfig(readForm());
     fillForm(state.cfg);
+    renderScope();
+    renderPicker();
     toast(state.status.Running ? 'Settings saved. Restart the model to apply model settings.' : 'Settings saved.', 'ok');
     computeTune();
   } catch (err) {
@@ -482,13 +561,15 @@ async function loadLocalModels() {
   }
   renderLocalModels();
   renderPicker();
+  renderScope();
 }
 $('refresh-local').addEventListener('click', async () => { await loadLocalModels(); toast('Model folders rescanned.'); });
 
 function modelBadges(g) {
   const q = quantOf(g.Files[0].Path.split(/[\\/]/).pop());
   const fit = fitOf(g.TotalSize);
-  return [q && badge(q, 'accent'), g.Files.length > 1 && badge(`${g.Files.length} parts`), fit && badge(fit.label, fit.kind)];
+  return [q && badge(q, 'accent'), g.Files.length > 1 && badge(`${g.Files.length} parts`), fit && badge(fit.label, fit.kind),
+    hasOverride(state.cfg, modelId(g.Files[0].Path)) && badge('own settings')];
 }
 
 function renderLocalModels() {

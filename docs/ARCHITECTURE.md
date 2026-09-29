@@ -190,6 +190,13 @@ counted once. Model ids strip only the shard suffix and `.gguf`, so dots in
 names (`Qwen3.8`) survive. Single-model mode passes the same id as `--alias`
 (unless one is set), so `/v1/models` reports it instead of the part-1 path.
 
+Per-model settings (`model_overrides` in config.json, keyed by that id)
+replace the shared `model` settings for that model, both when it is planned
+and launched alone and in its router section. Settings the router can only
+take once for all models (the API key, and the environment variables for
+the GPU prompt offload and block attention) always come from the defaults
+in on-demand mode.
+
 ## Performance work (backend source review)
 
 What the llama.cpp source review turned up, and what was done about it.

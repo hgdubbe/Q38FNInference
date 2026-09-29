@@ -103,7 +103,10 @@
       <div class="card only-single">
         <div class="card-head">
           <h2>Model</h2>
-          <button class="btn btn-link" data-goto="models">Browse &amp; download</button>
+          <div class="card-tools">
+            <button class="btn btn-link" id="model-settings-link">Its settings</button>
+            <button class="btn btn-link" data-goto="models">Browse &amp; download</button>
+          </div>
         </div>
         <div id="model-picker" class="dropdown"></div>
       </div>
@@ -241,6 +244,17 @@
 
       <form id="settings-form" autocomplete="off" novalidate>
         <div class="card">
+          <div class="card-head"><h2>Settings for</h2></div>
+          <div class="form-grid">
+            <label class="field"><span class="field-label">Model</span>
+              <select id="settings-scope"><option value="">All models (defaults)</option></select>
+            </label>
+          </div>
+          <label class="check" id="scope-custom-row" hidden><input type="checkbox" id="scope-custom"><span><b>Give this model its own settings</b><small>Starts from a copy of the defaults. Otherwise it follows them.</small></span></label>
+          <p class="muted small" id="scope-note"></p>
+        </div>
+
+        <div class="card global-only">
           <div class="card-head"><h2>System prompt</h2></div>
           <p class="muted small">Added by the launcher to every chat request: the chat window, other apps and agents using the API.</p>
           <div class="field">
@@ -336,20 +350,20 @@
         <div class="card">
           <div class="card-head"><h2>API access</h2></div>
           <div class="form-grid">
-            <label class="field"><span class="field-label">Port</span><input name="port" type="number" min="1" max="65535"></label>
-            <label class="field"><span class="field-label">Who can connect</span>
+            <label class="field global-only"><span class="field-label">Port</span><input name="port" type="number" min="1" max="65535"></label>
+            <label class="field global-only"><span class="field-label">Who can connect</span>
               <select name="api_host">
                 <option value="127.0.0.1">Only this PC</option>
                 <option value="0.0.0.0">Other devices on my network</option>
               </select>
             </label>
-            <label class="field"><span class="field-label">API key</span><input name="model.api_key" type="password" placeholder="none" autocomplete="new-password"><small class="help">Recommended when other devices can connect.</small></label>
+            <label class="field global-only"><span class="field-label">API key</span><input name="model.api_key" type="password" placeholder="none" autocomplete="new-password"><small class="help">Recommended when other devices can connect.</small></label>
             <label class="field"><span class="field-label">Model name reported to clients</span><input name="model.alias" placeholder="file name"></label>
           </div>
-          <p class="muted small">Port and network changes take effect after restarting the app.</p>
+          <p class="muted small global-only">Port and network changes take effect after restarting the app.</p>
         </div>
 
-        <div class="card">
+        <div class="card global-only">
           <div class="card-head"><h2>App</h2></div>
           <label class="check"><input type="checkbox" name="open_chat_on_ready"><span><b>Open the chat when a model is ready</b></span></label>
           <label class="check"><input type="checkbox" name="exit_with_panel"><span><b>Quit when this window is closed</b><small>Otherwise the app keeps running in the system tray; right-click the tray icon to quit.</small></span></label>
