@@ -63,22 +63,48 @@ func TestPinsMinimalExpertsToFit(t *testing.T) {
 	// 8 blocks x (1 GiB experts + 10 MiB shared) + 10 MiB output.
 	m := synthModel(8, 1*GiB, 10*MiB, 10*MiB)
 	free := overhead(true) + 3*GiB + 100*MiB // room for dense part + 3 blocks' experts
-	p, err := Compute(m, []GPU{{Index: 0, FreeBytes: free}}, Options{})
+
+	// without op offload: only the weights compete for VRAM
+	p, err := Compute(m, []GPU{{Index: 0, FreeBytes: free}}, Options{NoOpOffload: true, UBatch: 512})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.NGpuLayers != 9 || p.NCPUMoE != 5 {
-		t.Errorf("ngl=%d ncmoe=%d, want 9 and 5", p.NGpuLayers, p.NCPUMoE)
+	if p.NGpuLayers != 9 || p.NCPUMoE != 5 || p.StagingBytes != 0 {
+		t.Errorf("no-op-offload: ngl=%d ncmoe=%d staging=%d, want 9, 5, 0", p.NGpuLayers, p.NCPUMoE, p.StagingBytes)
+	}
+
+	// default: experts in RAM get a staging area for one block (1 GiB) and
+	// the micro-batch goes to 2048 (+512 MiB compute), leaving room for one
+	// block's experts on the GPU
+	p, err = Compute(m, []GPU{{Index: 0, FreeBytes: free}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.NGpuLayers != 9 || p.NCPUMoE != 7 {
+		t.Errorf("ngl=%d ncmoe=%d, want 9 and 7", p.NGpuLayers, p.NCPUMoE)
+	}
+	if p.StagingBytes != 1*GiB || p.UBatch != 2048 || p.NoOpOffload {
+		t.Errorf("staging=%d ubatch=%d noOpOffload=%v, want 1 GiB, 2048, false", p.StagingBytes, p.UBatch, p.NoOpOffload)
+	}
+	args := p.Args("m.gguf")
+	for _, want := range []string{"--ubatch-size", "2048"} {
+		if !slices.Contains(args, want) {
+			t.Errorf("args %v missing %q", args, want)
+		}
 	}
 }
 
 func TestPartialOffloadPinsExpertsAndUsesTrailingSlots(t *testing.T) {
-	// dense part alone (8 x 80 MiB + output) can't fit a ~250 MiB budget
+	// dense part alone (8 x 80 MiB + output) can't fit a ~250 MiB budget,
+	// and a 1 GiB staging area certainly can't: the planner drops op offload
 	m := synthModel(8, 1*GiB, 80*MiB, 20*MiB)
-	free := overhead(true) + 250*MiB
+	free := overhead(true) + 512*MiB + 250*MiB // +512 MiB: compute at ubatch 2048
 	p, err := Compute(m, []GPU{{Index: 0, FreeBytes: free}}, Options{})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !p.NoOpOffload || !slices.Contains(p.Args("m"), "--no-op-offload") {
+		t.Errorf("NoOpOffload = %v, want true (staging can't fit)", p.NoOpOffload)
 	}
 	// output (20) + 3 blocks (240) = 260 > 250; output + 2 blocks = 180 fits
 	if p.NGpuLayers != 3 {
@@ -89,6 +115,16 @@ func TestPartialOffloadPinsExpertsAndUsesTrailingSlots(t *testing.T) {
 	}
 	if p.GPUFitBytes != 180*MiB {
 		t.Errorf("GPUFitBytes = %d MiB, want 180", p.GPUFitBytes/MiB)
+	}
+}
+
+func TestFullFitNeedsNoStagingOrBiggerBatch(t *testing.T) {
+	p, err := Compute(synthModel(4, 100*MiB, 10*MiB, 10*MiB), []GPU{{FreeBytes: 10 * GiB}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.StagingBytes != 0 || p.UBatch != 0 || slices.Contains(p.Args("m"), "--ubatch-size") {
+		t.Errorf("staging=%d ubatch=%d: nothing in RAM, so neither should be set", p.StagingBytes, p.UBatch)
 	}
 }
 

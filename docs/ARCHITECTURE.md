@@ -160,6 +160,64 @@ router's own id; when the file changes the launcher calls
 `--api-key` and `--sleep-idle-seconds` are passed to the router, which the
 model instances inherit.
 
+## Performance work (backend source review)
+
+What the llama.cpp source review turned up, and what was done about it.
+Nothing here could be measured on an NVIDIA GPU (none was available);
+everything that could be run was run on a CPU build of the same commit.
+
+Changed:
+
+- **Hybrid CPUs on Windows** (`patches/0002-windows-hybrid-cpu-threads.patch`).
+  llama.cpp picks the math thread count from the performance cores only on
+  Linux; on Windows it counted every physical core, E-cores included.
+  Every graph step waits for its slowest thread, so on Intel 12th-14th gen
+  the E-cores held back the CPU-resident expert matmuls. The patch applies
+  the same rule on Windows (cores with the highest `EfficiencyClass`); on
+  non-hybrid CPUs nothing changes.
+- **Op-offload staging VRAM.** When weights stay in RAM, llama.cpp copies a
+  RAM-resident layer's whole weight tensor to the first GPU for each prompt
+  micro-batch of at least `GGML_OP_OFFLOAD_MIN_BATCH` tokens
+  (`ggml-backend.cpp`, cause "1.off"), and reserves compute-buffer space
+  for that at load. The planner now keeps the largest RAM-resident block
+  free on the main GPU (previously a flat 1 GiB, which a large MoE layer
+  exceeds: a load-time out-of-memory), and drops op offload
+  (`--no-op-offload`) when a small GPU would lose whole layers to it.
+- **Micro-batch 2048 with RAM-resident weights.** Each of those copies moves
+  every expert of the layer over PCIe; a 4x larger micro-batch spreads that
+  fixed cost over 4x more prompt tokens. The compute-buffer estimate grows
+  accordingly.
+- **MoE-aware offload threshold.** llama.cpp uses 32 tokens for dense and
+  MoE ops alike, but for a sparse MoE the copy moves all experts while the
+  CPU only reads the ones a batch routes to. The launcher sets
+  `GGML_OP_OFFLOAD_MIN_BATCH=128` (Settings → Model), roughly where a PCIe
+  4.0 x16 copy of a large MoE layer and a desktop CPU's prompt throughput
+  break even.
+- **RAM check.** The plan warns when the weights kept in RAM exceed physical
+  memory (they are memory-mapped and would be re-read from disk per token).
+- **Benchmark** (Run tab): a fixed ~1500-token prompt plus exactly 128
+  generated tokens, straight against llama-server, reporting its own
+  timings, so each of the above can be checked and tuned on real hardware.
+
+Looked at and left alone:
+
+- **The 51B-parameter PLE n-gram table** is already an input-layer tensor in
+  llama.cpp (kept in RAM, lazily read through mmap), and the planner already
+  counted it as such.
+- **Repacking IQ4_XS for the CPU.** llama.cpp repacks Q4_0/Q4_K/IQ4_NL/...
+  into SIMD-friendly layouts, but not IQ4_XS. Converting to IQ4_NL at load
+  would make it repackable, but IQ4_NL is 6% larger and token generation
+  from RAM is bandwidth-bound, so decoding would get slower; the gain would
+  be in CPU prompt processing, which the offload threshold already sends
+  to the GPU above 128 tokens.
+- **CUDA kernels** (gated delta net, MMQ, flash attention) are already
+  specialised per architecture; changing them without a GPU to verify
+  correctness and speed would be guesswork.
+- **Graph overhead.** A random-weight qwen4exp model runs at ~0.8 ms/token of
+  fixed overhead on this 4-core CPU; the real model's per-token time is
+  dominated by streaming the active experts from RAM, so graph-level
+  micro-optimisation wouldn't be visible.
+
 ## Known limitations / open questions
 
 - Nothing here has been run against real Qwen3.8-Flash-Next weights or real

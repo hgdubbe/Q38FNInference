@@ -102,13 +102,31 @@ jobs:
         with:
           path: launcher
 
+      # ggml-cuda.dll is built from ggml sources only: patches elsewhere in
+      # llama.cpp (named anything but ggml-*.patch) don't invalidate it, so
+      # an earlier build of the same commit is reused
       - id: cache
         uses: actions/cache@v4
         with:
           path: out
-          key: llama-cuda-${{ env.LLAMA_CACHE_VERSION }}-${{ env.LLAMA_CPP_REF }}-${{ hashFiles('launcher/patches/**') }}
+          key: llama-cuda-${{ env.LLAMA_CACHE_VERSION }}-${{ env.LLAMA_CPP_REF }}-g${{ hashFiles('launcher/patches/ggml-*.patch') }}
+          restore-keys: |
+            llama-cuda-${{ env.LLAMA_CACHE_VERSION }}-${{ env.LLAMA_CPP_REF }}-
 
-      - if: steps.cache.outputs.cache-hit != 'true'
+      - id: need
+        shell: bash
+        run: |
+          if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          elif [ -f out/ggml-cuda.dll ] && ! compgen -G "launcher/patches/ggml-*.patch" > /dev/null; then
+            echo "reusing ggml-cuda.dll from an earlier build of ${{ env.LLAMA_CPP_REF }} (no ggml patches)"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            rm -rf out
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.need.outputs.build == 'true'
         uses: actions/checkout@v6
         with:
           repository: ggml-org/llama.cpp
@@ -116,24 +134,24 @@ jobs:
           path: llama.cpp
 
       - name: Apply patches
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.need.outputs.build == 'true'
         shell: bash
         working-directory: llama.cpp
         run: for p in ../launcher/patches/*.patch; do git apply --verbose "$p"; done
 
       - name: Install CUDA Toolkit
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.need.outputs.build == 'true'
         uses: ./llama.cpp/.github/actions/windows-setup-cuda
         with:
           cuda_version: "12.4"
           cuda_arch: x64
 
       - name: Install Ninja
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.need.outputs.build == 'true'
         run: choco install ninja -y
 
       - name: Build
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.need.outputs.build == 'true'
         shell: cmd
         working-directory: llama.cpp
         run: |
@@ -149,7 +167,7 @@ jobs:
           cmake --build build --config Release -j %NINJA_JOBS% --target ggml-cuda
 
       - name: Collect ggml-cuda.dll + CUDA runtime
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.need.outputs.build == 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force out | Out-Null

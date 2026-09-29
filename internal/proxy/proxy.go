@@ -59,6 +59,13 @@ func (p *Proxy) SetTarget(u *url.URL) {
 	}
 }
 
+// Target is the llama-server currently served, or nil.
+func (p *Proxy) Target() *url.URL {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.target
+}
+
 // SetSystemPrompt updates the prompt policy for subsequent requests.
 func (p *Proxy) SetSystemPrompt(mode Mode, prompt string) {
 	p.mu.Lock()

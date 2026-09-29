@@ -85,3 +85,7 @@ body.mode-single .only-ondemand, body.mode-ondemand .only-single { display: none
 .pill.loaded { background: var(--ok); color: #000; }
 .pill.sleeping { background: var(--border); }
 .pill.failed { background: var(--danger); color: #fff; }
+table.bench { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+table.bench th, table.bench td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+table.bench td.num { font-variant-numeric: tabular-nums; }
+table.bench td.args { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; }

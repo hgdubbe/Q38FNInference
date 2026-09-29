@@ -65,6 +65,10 @@ type ModelSettings struct {
 	Threads    int    `json:"threads,omitempty"`
 	BatchSize  int    `json:"batch_size,omitempty"`
 	UBatchSize int    `json:"ubatch_size,omitempty"`
+	// OffloadMinBatch is the prompt batch size from which llama.cpp copies
+	// RAM-resident weights to the GPU instead of computing on the CPU
+	// (GGML_OP_OFFLOAD_MIN_BATCH). 0 = DefaultOffloadMinBatch.
+	OffloadMinBatch int `json:"offload_min_batch,omitempty"`
 
 	Temperature     *float64 `json:"temperature,omitempty"`
 	TopP            *float64 `json:"top_p,omitempty"`
@@ -81,6 +85,22 @@ type ModelSettings struct {
 	APIKey    string `json:"api_key,omitempty"`
 	Alias     string `json:"alias,omitempty"`
 	ExtraArgs string `json:"extra_args,omitempty"` // whitespace-separated, appended last
+}
+
+// DefaultOffloadMinBatch replaces llama.cpp's 32. The copy moves a layer's
+// whole expert tensor (every expert) over PCIe, while the CPU only reads
+// the experts a batch routes to, so for sparse MoE the copy pays off only
+// for longer batches; ~128 tokens is where a PCIe 4.0 x16 copy of a large
+// MoE layer and a desktop CPU's prompt throughput roughly break even.
+const DefaultOffloadMinBatch = 128
+
+// Env renders the environment variables these settings need.
+func (s ModelSettings) Env() []string {
+	n := s.OffloadMinBatch
+	if n <= 0 {
+		n = DefaultOffloadMinBatch
+	}
+	return []string{"GGML_OP_OFFLOAD_MIN_BATCH=" + strconv.Itoa(n)}
 }
 
 // Args renders the sampling/runtime llama-server flags for these settings.

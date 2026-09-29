@@ -262,7 +262,7 @@ func (s *Server) startRouter(w http.ResponseWriter) {
 	}
 
 	// every plan was made for the same GPU set, ordered the same way
-	env := []string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}
+	env := append([]string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}, cfg.Model.Env()...)
 	if devs := planDevices(gpus); len(devs) > 0 {
 		env = append(env, "CUDA_VISIBLE_DEVICES="+devs)
 	}

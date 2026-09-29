@@ -52,13 +52,25 @@ type Plan struct {
 	DeviceBytes []uint64 // estimated bytes placed on each device
 	CtxSize     uint64
 	Parallel    int
+	// UBatch is the micro-batch size to pass (0 = llama.cpp's default, 512).
+	// Raised when weights stay in RAM, see Compute.
+	UBatch int
+	// StagingBytes is VRAM kept free on the main GPU for llama.cpp's
+	// per-batch copies of RAM-resident weights (op offload).
+	StagingBytes uint64
+	// NoOpOffload: the GPU is too small for that staging area, so prompt
+	// processing keeps RAM-resident weights on the CPU (--no-op-offload).
+	NoOpOffload bool
 	FlashAttn   bool
 	CacheTypeKV string
 	Notes       []string
 	GPUFitBytes uint64
 	CPUFitBytes uint64
 	TotalBytes  uint64
-	FullyOnGPU  bool
+	// InputBytes are embedding tables (token_embd, the PLE n-gram table):
+	// memory-mapped and read a few rows per token, so they needn't fit in RAM.
+	InputBytes uint64
+	FullyOnGPU bool
 }
 
 // Options lets the caller override what would otherwise be auto-picked.
@@ -69,6 +81,11 @@ type Options struct {
 	// ReserveBytes is extra safety headroom kept free on every GPU on top
 	// of the modelled CUDA context and compute buffers. 0 = 512 MiB.
 	ReserveBytes uint64
+	// UBatch forces the micro-batch size; 0 lets the planner pick.
+	UBatch int
+	// NoOpOffload: llama-server runs with --no-op-offload, so RAM-resident
+	// weights are never copied to the GPU and need no staging VRAM.
+	NoOpOffload bool
 }
 
 // llama.cpp's LLM_FFN_EXPS_REGEX (common/common.h), anchored to a block index.
@@ -78,10 +95,26 @@ var inputTensorRe = regexp.MustCompile(`^(token_embd|pos_embd|token_types|per_la
 
 const (
 	cudaContextBytes  = 512 * MiB // CUDA context + cuBLAS workspace, per device
-	computeMainBytes  = 1 * GiB   // compute buffer on the first GPU (holds logits)
+	computeMainBytes  = 1 * GiB   // compute buffer on the first GPU at ubatch 512 (holds logits)
 	computeOtherBytes = 256 * MiB
 	defaultCtxCap     = 65536
+
+	defaultUBatch = 512
+	// With weights in RAM, llama.cpp copies each RAM-resident layer's whole
+	// weight tensor to the main GPU once per micro-batch during prompt
+	// processing (ggml-backend.cpp, "1.off" op offload). A larger micro-batch
+	// spreads that fixed PCIe cost over more tokens.
+	offloadUBatch = 2048
 )
+
+// computeMain is the main GPU's compute buffer estimate for a micro-batch
+// size: activations grow with it (roughly +512 MiB going 512 -> 2048).
+func computeMain(ub int) uint64 {
+	if ub <= defaultUBatch {
+		return computeMainBytes
+	}
+	return computeMainBytes + uint64(ub-defaultUBatch)*512*MiB/uint64(offloadUBatch-defaultUBatch)
+}
 
 type slot struct {
 	shared, expert, cache uint64
@@ -152,6 +185,7 @@ func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 		Parallel:    opt.Parallel,
 		CacheTypeKV: opt.CacheType,
 		TotalBytes:  inputBytes,
+		InputBytes:  inputBytes,
 	}
 	for _, s := range slots {
 		plan.TotalBytes += s.bytes(true)
@@ -187,35 +221,41 @@ func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 		return 0
 	})
 
-	budgets := make([]int64, len(gpus))
-	for d, g := range gpus {
-		compute := uint64(computeOtherBytes)
-		if d == 0 {
-			compute = computeMainBytes
-		}
-		budgets[d] = int64(g.FreeBytes) - int64(cudaContextBytes+compute+opt.ReserveBytes)
+	for _, g := range gpus {
 		plan.Devices = append(plan.Devices, g.Index)
 		plan.DeviceNames = append(plan.DeviceNames, g.Name)
 	}
 
-	// Phase 1: every slot on GPU; pin as few blocks' experts to CPU as needed.
-	nCPUMoE, k := -1, n+1
-	for N := 0; N <= n; N++ {
-		if _, ok := place(slots, N, k, budgets); ok {
-			nCPUMoE = N
-			break
+	ub := opt.UBatch
+	if ub == 0 {
+		ub = defaultUBatch
+	}
+	nCPUMoE, k, staging := solve(slots, gpus, opt, ub)
+	if opt.UBatch == 0 && (nCPUMoE > 0 || k < n+1) {
+		// weights stay in RAM: re-plan with the larger micro-batch, whose
+		// bigger compute buffer may push one more block's experts to RAM
+		ub = offloadUBatch
+		nCPUMoE, k, staging = solve(slots, gpus, opt, ub)
+		plan.UBatch = ub
+	} else if opt.UBatch != 0 {
+		plan.UBatch = opt.UBatch
+	}
+	if !opt.NoOpOffload && (nCPUMoE > 0 || k < n+1) {
+		// Copying RAM-resident weights to the GPU speeds up long prompts but
+		// needs a staging area; on a GPU too small for it, keeping whole
+		// slots on the GPU matters more, so plan without op offload then.
+		noOff := opt
+		noOff.NoOpOffload = true
+		N2, k2, _ := solve(slots, gpus, noOff, ub)
+		if k2 > k {
+			opt = noOff
+			nCPUMoE, k, staging = N2, k2, 0
+			plan.NoOpOffload = true
+			plan.Notes = append(plan.Notes, "GPU too small to also stage RAM-resident weights for prompt processing: prompts are processed on the CPU for those layers (--no-op-offload)")
 		}
 	}
-	// Phase 2: even all experts on CPU don't fit; offload as many trailing
-	// slots as possible (experts stay pinned, since they can't fit anyway).
-	if nCPUMoE < 0 {
-		nCPUMoE = n
-		for k = n; k > 0; k-- {
-			if _, ok := place(slots, nCPUMoE, k, budgets); ok {
-				break
-			}
-		}
-	}
+	plan.StagingBytes = staging
+	budgets := deviceBudgets(gpus, opt, ub, staging)
 
 	counts, _ := place(slots, nCPUMoE, k, budgets)
 	plan.NGpuLayers = k
@@ -243,6 +283,10 @@ func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 		plan.Notes = append(plan.Notes, "all weights and cache fit on GPU")
 	case k == n+1:
 		plan.Notes = append(plan.Notes, fmt.Sprintf("MoE experts of the first %d/%d blocks stay in CPU RAM; attention, gated-delta-net and shared weights are all on GPU", nCPUMoE, n))
+		if staging > 0 {
+			plan.Notes = append(plan.Notes, fmt.Sprintf("%.1f GiB kept free on %s for copying RAM-resident experts to the GPU during long prompts; micro-batch %d so each copy serves more tokens",
+				float64(staging)/GiB, gpus[0].Name, ub))
+		}
 	case k == 0:
 		plan.Notes = append(plan.Notes, "the GPU(s) can't hold even one block's non-expert weights plus cache; running CPU-only")
 		plan.FlashAttn = false
@@ -260,6 +304,66 @@ func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 		}
 	}
 	return plan, nil
+}
+
+// deviceBudgets is what each GPU can hold for weights and cache: free
+// memory minus CUDA context, compute buffers, safety reserve and, on the
+// main GPU, the op-offload staging area.
+func deviceBudgets(gpus []GPU, opt Options, ub int, staging uint64) []int64 {
+	budgets := make([]int64, len(gpus))
+	for d, g := range gpus {
+		compute := uint64(computeOtherBytes)
+		if d == 0 {
+			compute = computeMain(ub) + staging
+		}
+		budgets[d] = int64(g.FreeBytes) - int64(cudaContextBytes+compute+opt.ReserveBytes)
+	}
+	return budgets
+}
+
+// stagingFor is the largest single block's worth of RAM-resident weights:
+// llama.cpp sizes the main GPU's compute buffer for copying it over during
+// prompt processing. Zero when nothing stays in RAM or op offload is off.
+func stagingFor(slots []slot, nCPUMoE, k int, opt Options) uint64 {
+	if opt.NoOpOffload {
+		return 0
+	}
+	first := len(slots) - k // slots before this are wholly in RAM
+	var most uint64
+	for j := 0; j < len(slots)-1; j++ {
+		var ram uint64
+		if j < first {
+			ram = slots[j].shared + slots[j].expert
+		} else if j < nCPUMoE {
+			ram = slots[j].expert
+		}
+		most = max(most, ram)
+	}
+	return most
+}
+
+// solve finds the placement for one micro-batch size: the fewest blocks'
+// experts pinned to RAM (phase 1), or failing that the most trailing slots
+// on GPU with all experts in RAM (phase 2). The staging reserve depends on
+// what ends up in RAM, so each candidate is checked with its own.
+func solve(slots []slot, gpus []GPU, opt Options, ub int) (nCPUMoE, k int, staging uint64) {
+	n := len(slots) - 1
+	fits := func(N, k int) (uint64, bool) {
+		st := stagingFor(slots, N, k, opt)
+		_, ok := place(slots, N, k, deviceBudgets(gpus, opt, ub, st))
+		return st, ok
+	}
+	for N := 0; N <= n; N++ {
+		if st, ok := fits(N, n+1); ok {
+			return N, n + 1, st
+		}
+	}
+	for k = n; k > 0; k-- {
+		if st, ok := fits(n, k); ok {
+			return n, k, st
+		}
+	}
+	return n, 0, 0
 }
 
 // place packs the last k slots (with experts of blocks < nCPUMoE on CPU)
@@ -378,6 +482,12 @@ func (p *Plan) Args(modelPath string) []string {
 	}
 	if p.NCPUMoE > 0 && p.NGpuLayers > 0 {
 		args = append(args, "--n-cpu-moe", strconv.Itoa(p.NCPUMoE))
+	}
+	if p.NoOpOffload {
+		args = append(args, "--no-op-offload")
+	}
+	if p.UBatch > 0 {
+		args = append(args, "--batch-size", strconv.Itoa(max(p.UBatch, 2048)), "--ubatch-size", strconv.Itoa(p.UBatch))
 	}
 	if len(p.TensorSplit) > 1 {
 		s := ""

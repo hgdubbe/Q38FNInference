@@ -79,7 +79,7 @@ document.querySelectorAll('.tab-btn').forEach((b) => b.addEventListener('click',
 const form = $('settings-form');
 const numberFields = new Set(['port', 'model.ctx_size', 'model.parallel', 'model.threads', 'model.batch_size',
   'model.ubatch_size', 'model.temperature', 'model.top_p', 'model.top_k', 'model.min_p', 'model.repeat_penalty',
-  'model.presence_penalty', 'model.max_tokens', 'model.seed']);
+  'model.presence_penalty', 'model.max_tokens', 'model.seed', 'model.offload_min_batch']);
 
 function getPath(obj, path) {
   return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
@@ -510,6 +510,7 @@ async function refreshServerStatus() {
     $('start-server').disabled = st.Running;
     $('stop-server').disabled = !st.Running;
     $('open-webui').disabled = !st.Ready;
+    $('bench-run').disabled = !st.Ready;
     $('chat-send').disabled = !st.Ready;
   } catch (_) { /* transient */ }
 }
@@ -526,6 +527,50 @@ function streamLogs() {
   };
   es.onerror = () => { es.close(); setTimeout(streamLogs, 2000); };
 }
+
+// ---- benchmark --------------------------------------------------------------
+
+// the launch settings that matter for speed, pulled from the running args
+function speedSettings(args) {
+  const keep = ['--n-gpu-layers', '--n-cpu-moe', '--tensor-split', '--ubatch-size', '--ctx-size', '--cache-type-k', '--threads', '--no-op-offload'];
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (!keep.includes(args[i])) continue;
+    const v = args[i + 1] && !args[i + 1].startsWith('--') ? ' ' + args[i + 1] : '';
+    out.push(args[i].replace(/^--/, '') + v);
+  }
+  return out.join(', ');
+}
+
+$('bench-run').addEventListener('click', async () => {
+  const btn = $('bench-run');
+  btn.disabled = true;
+  $('bench-status').textContent = 'running… (a large model can take a minute)';
+  try {
+    const st = await api('GET', '/api/server/status');
+    const body = st.OnDemand ? { model: $('chat-model').value } : {};
+    const r = await api('POST', '/api/benchmark', body);
+    const settings = st.OnDemand ? 'on-demand (see presets)' : speedSettings(st.Args || []);
+    const tr = document.createElement('tr');
+    for (const [v, cls] of [
+      [new Date().toLocaleTimeString(), ''],
+      [r.model || '', ''],
+      [`${r.prompt_per_second.toFixed(1)} (${r.prompt_tokens} tok)`, 'num'],
+      [`${r.generated_per_second.toFixed(2)} (${r.generated_tokens} tok)`, 'num'],
+      [settings, 'args'],
+    ]) {
+      const td = el('td', cls, v);
+      tr.appendChild(td);
+    }
+    $('bench-table').querySelector('tbody').prepend(tr);
+    $('bench-table').hidden = false;
+    $('bench-status').textContent = `done in ${r.wall_seconds.toFixed(1)} s`;
+  } catch (e) {
+    $('bench-status').textContent = 'failed: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // ---- chat -----------------------------------------------------------------
 

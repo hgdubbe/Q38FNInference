@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/hgdubbe/q38fninference/internal/gguf"
+	"github.com/hgdubbe/q38fninference/internal/sysmem"
+	"github.com/hgdubbe/q38fninference/internal/tuning"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -114,5 +116,25 @@ func TestPanelAbandoned(t *testing.T) {
 	s.cfg.ExitWithPanel = true
 	if !s.panelAbandoned(time.Now().Add(time.Hour), 15*time.Second) {
 		t.Error("exit_with_panel must make it exit even with a tray icon")
+	}
+}
+
+func TestRAMCheck(t *testing.T) {
+	const G = uint64(1) << 30
+	plan := &tuning.Plan{CPUFitBytes: 50 * G, InputBytes: 10 * G} // 40 GiB must be resident
+	cases := []struct {
+		mem  sysmem.Info
+		want string
+	}{
+		{sysmem.Info{}, ""},
+		{sysmem.Info{Total: 32 * G, Available: 20 * G, OK: true}, "very slow"},
+		{sysmem.Info{Total: 64 * G, Available: 30 * G, OK: true}, "close other programs"},
+		{sysmem.Info{Total: 64 * G, Available: 50 * G, OK: true}, "40.0 GiB of weights stay in RAM"},
+	}
+	for _, c := range cases {
+		got := ramCheck(plan, c.mem)
+		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
+			t.Errorf("ramCheck(%+v) = %q, want it to contain %q", c.mem, got, c.want)
+		}
 	}
 }

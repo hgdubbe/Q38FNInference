@@ -29,6 +29,7 @@ import (
 	"github.com/hgdubbe/q38fninference/internal/proxy"
 	"github.com/hgdubbe/q38fninference/internal/reasoning"
 	"github.com/hgdubbe/q38fninference/internal/server"
+	"github.com/hgdubbe/q38fninference/internal/sysmem"
 	"github.com/hgdubbe/q38fninference/internal/tuning"
 )
 
@@ -135,6 +136,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/server/status", s.handleServerStatus)
 	mux.HandleFunc("GET /api/server/logs/stream", s.handleServerLogsStream)
 
+	mux.HandleFunc("POST /api/benchmark", s.handleBenchmark)
 	mux.HandleFunc("POST /api/router/rescan", s.handleRouterRescan)
 	mux.HandleFunc("GET /api/router/notes", s.handleRouterNotes)
 
@@ -400,11 +402,16 @@ func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU) (*tuneResponse, e
 		RequestedCtx: ms.CtxSize,
 		Parallel:     ms.Parallel,
 		CacheType:    ms.CacheType,
+		UBatch:       ms.UBatchSize,
+		NoOpOffload:  strings.Contains(" "+ms.ExtraArgs+" ", " --no-op-offload "),
 	})
 	if err != nil {
 		return nil, err
 	}
 	if note := sizeCheck(modelPath, meta); note != "" {
+		plan.Notes = append(plan.Notes, note)
+	}
+	if note := ramCheck(plan, sysmem.Read()); note != "" {
 		plan.Notes = append(plan.Notes, note)
 	}
 
@@ -417,6 +424,24 @@ func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU) (*tuneResponse, e
 	args := append(plan.Args(modelPath), ms.Args()...)
 	args = append(args, style.Args(level)...)
 	return &tuneResponse{Plan: plan, Args: args, Reasoning: style.Name}, nil
+}
+
+// ramCheck warns when the weights a plan keeps in RAM don't fit in physical
+// memory: they are memory-mapped, so the OS would keep re-reading them from
+// disk for every token. Embedding tables are excluded (a few rows per token).
+func ramCheck(plan *tuning.Plan, mem sysmem.Info) string {
+	if !mem.OK || plan.CPUFitBytes <= plan.InputBytes {
+		return ""
+	}
+	need := plan.CPUFitBytes - plan.InputBytes
+	gib := func(b uint64) float64 { return float64(b) / (1 << 30) }
+	switch {
+	case need > mem.Total*9/10:
+		return fmt.Sprintf("warning: %.1f GiB of weights stay in RAM but the machine has %.1f GiB: they will be re-read from disk constantly and generation will be very slow. Use a smaller quantization, or add GPUs.", gib(need), gib(mem.Total))
+	case need > mem.Available:
+		return fmt.Sprintf("%.1f GiB of weights stay in RAM and only %.1f GiB is free right now: close other programs, or the first answers will be slow while Windows pages", gib(need), gib(mem.Available))
+	}
+	return fmt.Sprintf("%.1f GiB of weights stay in RAM (%.1f GiB free)", gib(need), gib(mem.Available))
 }
 
 // sizeCheck flags a plan built from fewer tensor bytes than the model files
@@ -509,7 +534,7 @@ func (s *Server) handleServerStart(w http.ResponseWriter, r *http.Request) {
 	}
 	args := append(stripFlags(req.Args, "--host", "--port"), "--host", "127.0.0.1", "--port", strconv.Itoa(port))
 
-	env := []string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}
+	env := append([]string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}, cfg.Model.Env()...)
 	if len(req.Devices) > 0 {
 		ids := make([]string, len(req.Devices))
 		for i, d := range req.Devices {

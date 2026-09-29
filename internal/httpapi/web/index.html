@@ -82,6 +82,19 @@
     </div>
 
     <div class="panel">
+      <h2>Benchmark</h2>
+      <p class="hint">Runs a fixed ~1500-token prompt and generates exactly 128 tokens, straight against llama-server, and reports its own timings. Change a setting, restart, run again to compare.</p>
+      <div class="row">
+        <button id="bench-run" class="secondary">Run benchmark</button>
+        <span id="bench-status" class="hint"></span>
+      </div>
+      <table id="bench-table" class="bench" hidden>
+        <thead><tr><th>time</th><th>model</th><th>prompt t/s</th><th>generation t/s</th><th>settings</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
       <h3>llama-server log</h3>
       <pre id="server-log" class="log"></pre>
     </div>
@@ -189,7 +202,8 @@
         </label>
         <label>CPU threads <input name="model.threads" type="number" min="0" placeholder="auto"></label>
         <label>Batch size <input name="model.batch_size" type="number" min="0" placeholder="2048"></label>
-        <label>Micro-batch size <input name="model.ubatch_size" type="number" min="0" placeholder="512"></label>
+        <label>Micro-batch size <input name="model.ubatch_size" type="number" min="0" placeholder="auto (2048 if weights in RAM)"></label>
+        <label>GPU prompt offload from (tokens) <input name="model.offload_min_batch" type="number" min="1" placeholder="128"></label>
         <label>Model alias <input name="model.alias" placeholder="model file name"></label>
         <label>API key <input name="model.api_key" type="password" placeholder="none"></label>
       </div>

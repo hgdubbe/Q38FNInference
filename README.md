@@ -112,7 +112,7 @@ llama.cpp with CUDA:
 | `internal/models` | Local GGUF discovery |
 | `internal/gpu` | NVIDIA GPU detection (`nvidia-smi`) |
 | `internal/appconfig` | Persisted settings |
-| `patches/` | The patch applied to llama.cpp |
+| `patches/` | The patches applied to llama.cpp (startup info for qwen4exp; performance-core threads on Windows) |
 
 ## Status
 
