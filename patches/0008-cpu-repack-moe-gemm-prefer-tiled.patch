@@ -1,0 +1,142 @@
+diff --git a/ggml/src/ggml-cpu/repack.cpp b/ggml/src/ggml-cpu/repack.cpp
+index d56db98..b7624ba 100644
+--- a/ggml/src/ggml-cpu/repack.cpp
++++ b/ggml/src/ggml-cpu/repack.cpp
+@@ -12,6 +12,7 @@
+ #include "arch-fallback.h"
+ 
+ #include <cmath>
++#include <cstdlib>
+ #include <cstring>
+ #include <cassert>
+ #include <cstdio>  // for GGML_ASSERT
+@@ -4554,7 +4555,15 @@ class tensor_traits_base : public ggml::cpu::tensor_traits {
+ 
+ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PARAM_TYPE> class tensor_traits : public tensor_traits_base {
+ 
+-    bool work_size(int /* n_threads */, const struct ggml_tensor * op, size_t & size) override {
++    // MUL_MAT_ID: per thread, four gathered f32 rows, their interleaved quantization and the
++    // gemm output for the thread's column range, see forward_mul_mat_id
++    static size_t mmid_gemm_scratch(const struct ggml_tensor * op) {
++        const int64_t ne10 = op->src[1]->ne[0];
++        const int64_t ne01 = op->src[0]->ne[1];
++        return GGML_PAD(4*ne10*sizeof(float) + 4*ggml_row_size(PARAM_TYPE, ne10) + 4*ne01*sizeof(float), 64);
++    }
++
++    bool work_size(int n_threads, const struct ggml_tensor * op, size_t & size) override {
+         // not realy a GGML_TYPE_Q8_0 but same size.
+         switch (op->op) {
+             case GGML_OP_MUL_MAT:
+@@ -4574,6 +4583,8 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
+ 
+                     size += sizeof_mmid_row_mapping*ne02*(ne12 + 1);
+ 
++                    size = GGML_PAD(size, 64) + 64 + n_threads*mmid_gemm_scratch(op);
++
+                     return true;
+                 }
+             default:
+@@ -4865,6 +4876,14 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
+ 
+         ggml_barrier(params->threadpool);
+ 
++        char * gemm_scratch = (char *) GGML_PAD((uintptr_t) (wdata_src1_end + n_as*(ne12 + 1)*sizeof(mmid_row_mapping)), 64)
++                            + ith*mmid_gemm_scratch(op);
++        float * gemm_x   = (float *) gemm_scratch;
++        void  * gemm_q   = gemm_scratch + 4*ne10*sizeof(float);
++        float * gemm_out = (float *) ((char *) gemm_q + 4*ggml_row_size(PARAM_TYPE, ne10));
++
++        GGML_ASSERT(gemm_scratch + mmid_gemm_scratch(op) <= (char *) params->wdata + params->wsize);
++
+         // compute each matrix multiplication in sequence
+         for (int cur_a = 0; cur_a < n_as; ++cur_a) {
+             const int64_t cne1 = matrix_row_counts[cur_a];
+@@ -4892,7 +4911,30 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
+                 return;
+             }
+ 
+-            for (int ir1 = 0; ir1 < nr1; ir1++) {
++            // groups of four routed rows go through the 4-row gemm, as in forward_mul_mat, so the
++            // expert's weights are streamed once per four tokens instead of once per token
++            const int64_t ncols = src0_cur_end - src0_cur_start;
++            int ir1 = 0;
++            for (; ir1 + 4 <= nr1; ir1 += 4) {
++                for (int m = 0; m < 4; m++) {
++                    const struct mmid_row_mapping rm = MMID_MATRIX_ROW(cur_a, ir1 + m);
++                    memcpy(gemm_x + m*ne10,
++                           (const char *) src1->data + (rm.i1 % ne11)*nb11 + rm.i2*nb12,
++                           ne10*sizeof(float));
++                }
++                ggml_quantize_mat_t<INTER_SIZE, PARAM_TYPE>(gemm_x, gemm_q, 4, ne10);
++
++                gemm<BLOC_TYPE, INTER_SIZE, NB_COLS, PARAM_TYPE>(
++                    ne00, gemm_out, ncols, src0_cur + src0_cur_start * nb01, gemm_q, 4, ncols);
++
++                for (int m = 0; m < 4; m++) {
++                    const struct mmid_row_mapping rm = MMID_MATRIX_ROW(cur_a, ir1 + m);
++                    memcpy((float *) ((char *) dst->data + rm.i1*nb1 + rm.i2*nb2) + src0_cur_start,
++                           gemm_out + m*ncols, ncols*sizeof(float));
++                }
++            }
++
++            for (; ir1 < nr1; ir1++) {
+                 struct mmid_row_mapping row_mapping = MMID_MATRIX_ROW(cur_a, ir1);
+ 
+                 const int id = row_mapping.i1;  // selected expert index
+@@ -4922,6 +4964,21 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
+ 
+ }  // namespace ggml::cpu::repack
+ 
++// x86 builds carry the tiled K-quant matmul (tiled/tiled.cpp), which reads the original layout.
++// For Q4_K and Q2_K it is ~2x faster than the repacked gemm at prompt batches (512 tokens, dense
++// and MoE) and even at batch 1, and a repacked tensor can't use it, so leave those unrepacked.
++static bool ggml_repack_prefer_tiled() {
++#if defined(__AVX512VNNI__) || defined(__AVX2__) || defined(__AVX__)
++    static const bool tiled = [] {
++        const char * env = getenv("GGML_CPU_TILED_MM");
++        return env == NULL || atoi(env) != 0;
++    }();
++    return tiled;
++#else
++    return false;
++#endif
++}
++
+ static const ggml::cpu::tensor_traits * ggml_repack_get_optimal_repack_type(const struct ggml_tensor * cur) {
+     // instance for Q1_0
+     static const ggml::cpu::repack::tensor_traits<block_q1_0, 4, 4, GGML_TYPE_Q8_0> q1_0_4x4_q8_0;
+@@ -5004,7 +5061,7 @@ static const ggml::cpu::tensor_traits * ggml_repack_get_optimal_repack_type(cons
+             #endif
+         }
+     } else if (cur->type == GGML_TYPE_Q4_K) {
+-        if (ggml_cpu_has_avx2()) {
++        if (ggml_cpu_has_avx2() && !ggml_repack_prefer_tiled()) {
+             if (cur->ne[1] % 8 == 0) {
+                 return &q4_K_8x8_q8_K;
+             }
+@@ -5031,7 +5088,7 @@ static const ggml::cpu::tensor_traits * ggml_repack_get_optimal_repack_type(cons
+             #endif
+         }
+     } else if (cur->type == GGML_TYPE_Q2_K) {
+-        if (ggml_cpu_has_avx512()) {
++        if (ggml_cpu_has_avx512() && !ggml_repack_prefer_tiled()) {
+             if (cur->ne[1] % 8 == 0) {
+                 return &q2_K_8x8_q8_K;
+             }
+diff --git a/ggml/src/ggml-cpu/tiled/tiled.cpp b/ggml/src/ggml-cpu/tiled/tiled.cpp
+index 15a1d0c..a82e2f9 100644
+--- a/ggml/src/ggml-cpu/tiled/tiled.cpp
++++ b/ggml/src/ggml-cpu/tiled/tiled.cpp
+@@ -627,10 +627,11 @@ static bool ggml_tiled_supported(const struct ggml_tensor * src0,
+         case GGML_TYPE_IQ3_S:
+         case GGML_TYPE_IQ1_S:
+         case GGML_TYPE_IQ1_M:
+-            return true;
++            break;
+         default:
+             return false;
+     }
++    // (these checks were unreachable: the type switch returned true before them)
+     if (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_Q8_K) {
+         return false;
+     }

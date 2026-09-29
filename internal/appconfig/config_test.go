@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -79,5 +80,15 @@ func TestModelSettingsArgs(t *testing.T) {
 	}
 	if len(ModelSettings{}.Args()) != 0 {
 		t.Error("zero settings must add no flags")
+	}
+}
+
+func TestModelSettingsEnv(t *testing.T) {
+	if got := (ModelSettings{}).Env(); !slices.Equal(got, []string{"GGML_OP_OFFLOAD_MIN_BATCH=128"}) {
+		t.Errorf("default Env() = %v", got)
+	}
+	got := ModelSettings{OffloadMinBatch: 64, QSABlocks: true}.Env()
+	if !slices.Equal(got, []string{"GGML_OP_OFFLOAD_MIN_BATCH=64", "LLAMA_QWEN4EXP_QSA_BLOCKS=1"}) {
+		t.Errorf("Env() = %v", got)
 	}
 }

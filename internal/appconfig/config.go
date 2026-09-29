@@ -69,6 +69,11 @@ type ModelSettings struct {
 	// RAM-resident weights to the GPU instead of computing on the CPU
 	// (GGML_OP_OFFLOAD_MIN_BATCH). 0 = DefaultOffloadMinBatch.
 	OffloadMinBatch int `json:"offload_min_batch,omitempty"`
+	// QSABlocks selects qwen4exp's sparse-attention context by whole
+	// blocks instead of per cell (patches/0006, LLAMA_QWEN4EXP_QSA_BLOCKS):
+	// less compute memory at long contexts, close to but not identical to
+	// the reference selection. Experimental, off by default.
+	QSABlocks bool `json:"qsa_blocks,omitempty"`
 
 	Temperature     *float64 `json:"temperature,omitempty"`
 	TopP            *float64 `json:"top_p,omitempty"`
@@ -100,7 +105,11 @@ func (s ModelSettings) Env() []string {
 	if n <= 0 {
 		n = DefaultOffloadMinBatch
 	}
-	return []string{"GGML_OP_OFFLOAD_MIN_BATCH=" + strconv.Itoa(n)}
+	env := []string{"GGML_OP_OFFLOAD_MIN_BATCH=" + strconv.Itoa(n)}
+	if s.QSABlocks {
+		env = append(env, "LLAMA_QWEN4EXP_QSA_BLOCKS=1")
+	}
+	return env
 }
 
 // Args renders the sampling/runtime llama-server flags for these settings.

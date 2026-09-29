@@ -237,6 +237,47 @@ Changed:
   evicts expert pages, which are then re-read from disk per token. The
   launcher passes `--cache-ram` with what the RAM-resident weights leave
   (minus 4 GiB for the OS and buffers), or leaves the default when it fits.
+- **No pinned copy without op offload**
+  (`patches/0005-no-pinned-copy-without-op-offload.patch`, any model). With a
+  GPU present, llama.cpp stores every CPU-resident weight in a pinned CUDA
+  host buffer: a full, non-pageable copy that replaces the memory map. Its
+  only purpose is faster copies to the GPU for large batches (op offload),
+  yet it is made with `--no-op-offload` too. The patch makes
+  `--no-op-offload` imply `--no-host`, so those weights stay memory-mapped
+  (and repackable for the CPU kernels). The planner already switches op
+  offload off on GPUs too small for its staging area.
+- **CPU MoE matmul on repacked weights**
+  (`patches/0008-cpu-repack-moe-gemm-prefer-tiled.patch`, any model). The
+  repacked-weight path for `MUL_MAT_ID` ran its one-token kernel once per
+  token for every expert and never its 4-token kernel, re-reading each
+  expert's weights per token. It now gathers each expert's rows in fours
+  for the batched kernel. MoE matmul at 127 tokens: Q4_0 15.5 -> 12.2 ms,
+  IQ4_NL 17.3 -> 12.4 ms, at 32 tokens Q4_0 4.6 -> 3.4 ms; results match
+  the unrepacked path. Affects CPU-only builds and weights kept out of the
+  pinned buffer (above).
+- **Q4_K/Q2_K left to the tiled kernel on x86** (same patch). llama.cpp's
+  newer tiled K-quant matmul can't read repacked weights, and for these two
+  types the repacked kernel is the slower one: at a 512-token micro-batch
+  0.54x (dense) and 0.45x (MoE) of the tiled speed for Q4_K, 0.6-0.7x for
+  Q2_K, and equal at 1 token. x86 builds now leave them unrepacked, which
+  also keeps them memory-mapped instead of copied. Set
+  `GGML_CPU_TILED_MM=0` to get the old behaviour. The patch also fixes the
+  tiled kernel's src1 type/layout check, which was unreachable.
+- **qwen4exp models quantized by llama.cpp crashed**
+  (`patches/0007-qwen4exp-quantize-ple-norms.patch`). `llama-quantize`
+  quantized the PLE norm weights (2-D `[n_embd, hc]`, so its norm rule
+  missed them) and the graph then aborted in an elementwise multiply. They
+  now stay f32.
+- **Opt-in QSA block selection** (`patches/0006-qwen4exp-qsa-block-select.patch`,
+  Settings -> Model, off by default, `LLAMA_QWEN4EXP_QSA_BLOCKS=1`). Top-k
+  over the block scores instead of every cell, then a block mask expanded
+  to cells. Compute buffer 825 -> 569 MiB at 32k / ubatch 2048; logits
+  within ~1e-4 of the per-cell path on the test model, same greedy tokens;
+  CPU speed within noise. It keeps whole blocks, where the reference keeps
+  `top_k + ratio - 1` cells (possibly part of one more block, which part
+  depending on the backend's tie-breaking). CUDA's sparse flash attention
+  keeps at most `n_kv_max` visible cells per row; the bound passed allows
+  one block more than a contiguous context needs.
 - **RAM check.** The plan warns when the weights kept in RAM exceed physical
   memory (they are memory-mapped and would be re-read from disk per token).
 - **Benchmark** (Run tab): a fixed ~1500-token prompt plus exactly 128
@@ -263,12 +304,13 @@ Looked at and left alone:
 - **Recurrent-state rollback slots and context checkpoints** only cost
   memory with speculative decoding (slots) or every 8192 tokens
   (checkpoints of the small recurrent state); nothing to change.
-- **Selecting whole blocks instead of cells** would shrink the remaining
-  QSA buffer another ~4x, but the per-cell top-k can split a block at the
-  budget boundary, so it wouldn't reproduce the reference selection exactly.
-  **Caching pooled indexer keys** (only the newest block changes per token)
-  would save re-pooling the whole cache each step; it needs a new cache
-  tensor, and pooling is ~1/16 of the scoring cost at ratio 4.
+- **Only the used experts are copied** for op offload already (the
+  scheduler reads the routing ids and copies the used experts' ranges), and
+  every weight input starts its own split, so that applies to gate, up and
+  down alike.
+- **Caching pooled indexer keys** (only the newest QSA block changes per
+  token) would save re-pooling the whole cache each step; it needs a new
+  cache tensor, and pooling is ~1/16 of the scoring cost at ratio 4.
 - **Other graph work.** The hyper-connection mixers already use fused ops
   upstream; the remaining small elementwise ops are a few microseconds each
   on a GPU next to milliseconds of expert streaming.

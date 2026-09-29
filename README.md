@@ -112,7 +112,7 @@ llama.cpp with CUDA:
 | `internal/models` | Local GGUF discovery |
 | `internal/gpu` | NVIDIA GPU detection (`nvidia-smi`) |
 | `internal/appconfig` | Persisted settings |
-| `patches/` | The patches applied to llama.cpp (startup info for qwen4exp; performance-core threads on Windows; qwen4exp indexer skipped while it can't be sparse; fused, lower-memory qwen4exp indexer) |
+| `patches/` | The patches applied to llama.cpp (startup info for qwen4exp; performance-core threads on Windows; qwen4exp indexer skipped while it can't be sparse; fused, lower-memory qwen4exp indexer; no pinned weight copy without op offload; opt-in QSA block selection; qwen4exp quantization fix; faster CPU MoE matmul on repacked weights) |
 
 ## Status
 

@@ -1,0 +1,16 @@
+diff --git a/common/common.cpp b/common/common.cpp
+index 76c3442..95b0a26 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -1694,7 +1694,10 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
+     mparams.tensor_split    = params.tensor_split;
+     mparams.check_tensors   = params.check_tensors;
+     mparams.use_extra_bufts = !params.no_extra_bufts;
+-    mparams.no_host         = params.no_host;
++    // the host (pinned) buffer only speeds up copying CPU-resident weights to the GPU for large
++    // batches (op offload). without op offload it is a non-pageable copy of every CPU weight that
++    // replaces the memory map and keeps them from being repacked, for nothing
++    mparams.no_host         = params.no_host || params.no_op_offload;
+ 
+     if (params.kv_overrides.empty()) {
+         mparams.kv_overrides = NULL;

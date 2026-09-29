@@ -208,6 +208,7 @@
         <label>API key <input name="model.api_key" type="password" placeholder="none"></label>
       </div>
       <p class="hint">Reasoning is translated to whatever the model's chat template supports (on/off switch, effort level or thinking budget; the Run tab shows which). Levels a model can't express natively are enforced as a thinking-token cap: low 1024, medium 4096, high unlimited.</p>
+      <label class="inline"><input type="checkbox" name="model.qsa_blocks"> experimental: select Qwen3.8 sparse-attention context by whole blocks (less VRAM at long contexts, slightly different from the reference model)</label>
       <label class="block">Extra llama-server arguments <input name="model.extra_args" class="wide" placeholder="e.g. --load-mode mmap+mlock"></label>
     </div>
 
