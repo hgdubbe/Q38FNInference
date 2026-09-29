@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark light">
+<meta name="color-scheme" content="dark">
+<link rel="preload" href="fonts/space-grotesk-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
 <title>Q38FNInference</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%274%27 fill=%27%236e8bff%27/%3E%3Cpath d=%27M4 8h8M8 4v8%27 stroke=%27white%27 stroke-width=%272%27 stroke-linecap=%27round%27/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
@@ -11,14 +12,19 @@
 <body class="mode-single">
 <a class="skip" href="#main">Skip to content</a>
 
+<svg class="noise" aria-hidden="true" focusable="false"><title>Paper grain texture</title>
+  <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="4" stitchTiles="stitch"/></filter>
+  <rect width="100%" height="100%" filter="url(#grain)"/>
+</svg>
+
 <div class="shell">
   <!-- navigation + always-visible status (visibility of system status) -->
   <aside class="sidebar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true"></span>
       <div>
-        <div class="brand-name">Q38FNInference</div>
-        <div class="brand-sub">local LLM server</div>
+        <div class="brand-name">Q38<span>FN</span><br>Inference</div>
+        <div class="brand-sub">Local LLM server</div>
       </div>
     </div>
 
@@ -57,6 +63,7 @@
           <button role="radio" class="seg-btn" data-mode="ondemand" aria-checked="false">All models, on demand</button>
         </div>
       </header>
+      <div class="marquee marquee-fast" id="status-marquee" aria-hidden="true"></div>
       <p class="page-lead only-single">Pick a model and start it. The launcher works out how to split it across your GPUs and RAM.</p>
       <p class="page-lead only-ondemand">Every local model is offered through the API; the one a request names is loaded automatically, one at a time.</p>
 
@@ -192,6 +199,7 @@
         <h1 id="h-models">Models</h1>
         <button id="refresh-local" class="btn btn-secondary btn-sm">Rescan folders</button>
       </header>
+      <div class="marquee marquee-slow" id="models-marquee" aria-hidden="true"></div>
 
       <div class="card">
         <div class="card-head"><h2>On this PC</h2><span id="local-count" class="muted small"></span></div>

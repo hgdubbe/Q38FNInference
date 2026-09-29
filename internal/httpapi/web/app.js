@@ -50,6 +50,44 @@ function fmtDuration(s) {
   return m < 60 ? `${m} min ${s % 60} s` : `${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
+// "27.8 GB" -> ["27.8", "GB"], for number + unit at different sizes
+function splitBytes(n) {
+  const [v, u] = fmtBytes(n).split(' ');
+  return [v, u];
+}
+
+// Infinite marquee: two identical sets scrolled by one set width (CSS keyframes).
+// Rebuilt only when the text changes so the motion never restarts; speed in px/s.
+function marquee(host, items, speed) {
+  if (!host) return;
+  host._args = [items, speed];
+  // a strip on a hidden page measures 0 px wide: build it when the page is shown
+  if (!host.offsetParent) { host.dataset.key = ''; return; }
+  const key = JSON.stringify(items);
+  if (host.dataset.key === key) return;
+  host.dataset.key = key;
+  const set = () => {
+    const s = el('div', 'marquee-set');
+    for (const it of items) {
+      const span = el('span', 'marquee-item');
+      if (Array.isArray(it)) { span.appendChild(el('b', '', it[0])); span.appendChild(document.createTextNode(it[1])); }
+      else span.textContent = it;
+      s.appendChild(span);
+    }
+    return s;
+  };
+  const track = el('div', 'marquee-track');
+  track.append(set());
+  host.replaceChildren(track);
+  // repeat until one set is wider than the strip, so no gap ever shows
+  const first = track.firstChild;
+  while (first.scrollWidth < host.clientWidth && first.childNodes.length < 64) {
+    for (const c of [...set().childNodes]) first.appendChild(c);
+  }
+  track.appendChild(first.cloneNode(true));
+  host.style.setProperty('--marquee-dur', Math.max(8, first.scrollWidth / speed) + 's');
+}
+
 function el(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -184,6 +222,8 @@ function showPage(name) {
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
   $('main').scrollTop = 0;
   window.scrollTo(0, 0);
+  document.querySelectorAll('.page-head h1').forEach((h) => { h.style.transform = ''; h.style.opacity = ''; });
+  remeasureMarquees();
 }
 document.querySelectorAll('.nav-btn').forEach((b) => b.addEventListener('click', () => showPage(b.dataset.page)));
 document.addEventListener('click', (e) => {
@@ -388,6 +428,9 @@ function renderGPUs() {
     cb.addEventListener('change', onGPUToggle);
     top.append(cb, el('span', '', g.Name));
     card.appendChild(top);
+    const num = el('div', 'gpu-num', splitBytes(g.TotalBytes)[0]);
+    num.appendChild(el('small', '', splitBytes(g.TotalBytes)[1] + ' VRAM'));
+    card.appendChild(num);
 
     const used = g.TotalBytes - g.FreeBytes;
     const model = state.mode === 'single' && chosen.has(g.Index) ? (planBytes[g.Index] || 0) : 0;
@@ -449,6 +492,9 @@ function modelBadges(g) {
 }
 
 function renderLocalModels() {
+  marquee($('models-marquee'), state.localGroups.length
+    ? state.localGroups.map((g) => [g.Name, fmtBytes(g.TotalSize)])
+    : [['No models yet', 'download one below']], 35);
   const box = $('local-models');
   box.textContent = '';
   $('local-count').textContent = state.localGroups.length ? `${state.localGroups.length} model${state.localGroups.length > 1 ? 's' : ''}` : '';
@@ -733,15 +779,23 @@ function renderPlan() {
     out.appendChild(devs);
   }
 
-  const facts = el('div', 'facts');
-  const fact = (k, v) => { const f = el('span', 'fact'); f.append(el('b', '', k + ' '), document.createTextNode(v)); facts.appendChild(f); };
-  fact('Context', `${Number(p.CtxSize).toLocaleString()} tokens`);
-  fact('On GPU', fmtBytes(p.GPUFitBytes));
-  fact('In RAM', fmtBytes(p.CPUFitBytes));
-  fact('KV cache', p.CacheTypeKV);
-  if (p.Parallel > 1) fact('Parallel', p.Parallel);
-  fact('Thinking control', state.plan.reasoning || 'none');
-  out.appendChild(facts);
+  // the numbers that matter, at poster scale
+  const stats = el('div', 'stats');
+  const stat = (label, value, unit, text) => {
+    const t = el('div', 'stat');
+    const v = el('div', 'stat-value' + (text ? ' stat-text' : ''), value);
+    if (unit) v.appendChild(el('small', '', unit));
+    t.append(v, el('div', 'stat-label', label));
+    stats.appendChild(t);
+  };
+  const [ctxNum, ctxUnit] = p.CtxSize >= 1024 ? [Math.round(p.CtxSize / 1024), 'K'] : [p.CtxSize, ''];
+  stat('Tokens of context', String(ctxNum), ctxUnit);
+  stat('On GPU', ...splitBytes(p.GPUFitBytes));
+  stat('In RAM', ...splitBytes(p.CPUFitBytes));
+  stat('KV cache', p.CacheTypeKV);
+  if (p.Parallel > 1) stat('Parallel slots', String(p.Parallel));
+  stat('Thinking control', state.plan.reasoning || 'none', '', true);
+  out.appendChild(stats);
 
   const notes = (p.Notes || []).filter(Boolean);
   if (notes.length) {
@@ -832,24 +886,25 @@ function renderHero() {
   const st = state.status || {};
   let dot = '', title, detail, side;
   if (st.Running && st.Ready) {
-    dot = 'ok'; title = st.OnDemand ? 'Serving on demand' : 'Ready';
+    dot = 'ok'; title = st.OnDemand ? 'On demand' : 'Ready';
     detail = st.OnDemand ? 'Requests load the model they name.' : `${runningModelName(st)} is answering requests.`;
     side = 'Ready';
   } else if (st.Running) {
-    dot = 'busy'; title = st.OnDemand ? 'Starting the server…' : 'Loading the model…';
+    dot = 'busy'; title = st.OnDemand ? 'Starting' : 'Loading';
     const secs = st.StartedAt ? (Date.now() - Date.parse(st.StartedAt)) / 1000 : 0;
     detail = `${runningModelName(st)} · ${fmtDuration(secs)}${state.lastLog ? ' · ' + state.lastLog.slice(0, 90) : ''}`;
     side = 'Loading…';
   } else if (st.ExitErr) {
-    dot = 'bad'; title = 'The model stopped unexpectedly';
-    detail = st.ExitErr + '. The server log below has the details.';
+    dot = 'bad'; title = 'Crashed';
+    detail = `The model stopped unexpectedly (${st.ExitErr}). The server log below has the details.`;
     side = 'Stopped (error)';
   } else {
-    title = 'Ready to start';
+    title = 'Stopped';
     detail = state.mode === 'ondemand' ? 'Start to offer every local model through the API.'
       : state.model ? state.model.label : 'Choose a model below.';
     side = 'Stopped';
   }
+  $('hero').dataset.state = { ok: 'ready', busy: 'busy', bad: 'error' }[dot] || 'idle';
   $('hero-dot').className = 'dot dot-lg ' + dot;
   $('hero-title').textContent = title;
   $('hero-detail').textContent = detail;
@@ -865,6 +920,25 @@ function renderHero() {
   $('side-chat').disabled = !st.Ready;
   if (st.ExitErr && !st.Running) $('log-card').open = true;
   document.title = (st.Ready ? '● ' : st.Running ? '○ ' : '') + 'Q38FNInference';
+  renderStatusMarquee();
+}
+
+// the status ticker restates the essentials in poster type; it is aria-hidden,
+// everything in it is also on the page as plain text
+function renderStatusMarquee() {
+  const st = state.status || {};
+  const items = [st.Running ? (st.Ready ? 'Ready' : 'Loading') : st.ExitErr ? 'Crashed' : 'Stopped'];
+  if (st.Running) items.push(runningModelName(st));
+  else if (state.mode === 'ondemand') items.push('All models on demand');
+  else if (state.model) items.push(state.model.label);
+  const p = state.mode === 'single' && state.plan && state.plan.plan;
+  if (p) {
+    items.push(`${Number(p.CtxSize).toLocaleString()} tokens context`, `${fmtBytes(p.GPUFitBytes)} on GPU`, `${fmtBytes(p.CPUFitBytes)} in RAM`);
+  }
+  const gpus = selectedGPUs();
+  items.push(gpus.length ? gpus.map((g) => g.Name).join(' + ') : 'CPU only');
+  if (state.info.api_url) items.push('API ' + state.info.api_url.replace(/^https?:\/\//, ''));
+  marquee($('status-marquee'), items, 90);
 }
 
 // ---- run: on-demand models ------------------------------------------------
@@ -992,6 +1066,36 @@ $('log-copy').addEventListener('click', async () => {
   catch (_) { toast('Copy failed.', 'warn'); }
 });
 $('log-clear').addEventListener('click', () => { $('server-log').textContent = ''; });
+
+function remeasureMarquees() {
+  document.querySelectorAll('.page.active .marquee').forEach((m) => {
+    if (m._args) { m.dataset.key = ''; marquee(m, ...m._args); }
+  });
+}
+
+// ---- scroll motion -------------------------------------------------------------
+
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+let scrollTick = false;
+function onScroll() {
+  if (scrollTick) return;
+  scrollTick = true;
+  requestAnimationFrame(() => {
+    scrollTick = false;
+    const h1 = document.querySelector('.page.active .page-head h1');
+    if (!h1 || reducedMotion.matches) return;
+    const p = Math.min(window.scrollY / 360, 1);
+    h1.style.transform = `scale(${1 + p * 0.2})`;
+    h1.style.opacity = String(1 - p * 0.75);
+  });
+}
+window.addEventListener('scroll', onScroll, { passive: true });
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  // re-measure marquees for the new width
+  resizeTimer = setTimeout(remeasureMarquees, 200);
+});
 
 // ---- init -------------------------------------------------------------------
 

@@ -141,8 +141,21 @@ status"); advanced options are one disclosure level down, never deeper
 the next step (NN/g empty-state guidelines); system messages are toasts,
 and only destructive or overwriting actions ask for confirmation; download
 choices show whether a file fits the detected GPUs and RAM, as LM Studio
-does. Colours meet WCAG AA contrast in the dark and light themes, focus is
-always visible, and motion is off under prefers-reduced-motion.
+does.
+
+Visually it follows a "kinetic typography" system, all tokens in the `:root`
+block of `web/style.css`: Space Grotesk (bundled in `web/fonts/`, SIL Open
+Font License, so the panel works offline), uppercase display type at poster
+scale (page titles `clamp(3rem, 11vw, 11rem)`, the model state as the
+headline), one acid-yellow accent on near-black, flat 2px geometry with no
+radius or shadows, rows and tiles that flood with the accent on hover, and
+two marquees (a live status ticker and the local-model list) built in
+`app.js` from CSS keyframes. Deliberate departures for a tool rather than a
+poster: typed values keep their case (paths, keys, arguments are
+case-sensitive), placeholders stay legible because they carry real defaults,
+and errors and Stop use a red, since the single accent can't also mean
+danger. Text contrast is at least 7:1, focus is always visible, and every
+animation stops under prefers-reduced-motion.
 
 The release exe is linked as a Windows GUI program (`-H windowsgui`): no
 console window, child processes are started hidden, logs go to
