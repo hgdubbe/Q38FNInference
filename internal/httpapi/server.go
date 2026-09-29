@@ -146,6 +146,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/router/notes", s.handleRouterNotes)
 	mux.HandleFunc("GET /api/expert-stats", s.handleExpertStats)
 	mux.HandleFunc("DELETE /api/expert-stats", s.handleExpertStats)
+	mux.HandleFunc("POST /api/expert-stats", s.handleExpertStats)
 
 	// same-origin access to the model API for the control panel's chat tab,
 	// and to the router's model list / load / unload endpoints

@@ -32,3 +32,37 @@ func TestSummarizeExpertStats(t *testing.T) {
 		t.Errorf("top 25%% coverage = %+v, want ram 0.7, all 0.5", top25)
 	}
 }
+
+func TestExpertProfilesMatchLatestSession(t *testing.T) {
+	dir := t.TempDir()
+	run := func(profile, name string, hits string) {
+		p := filepath.Join(dir, profile)
+		os.MkdirAll(p, 0o755)
+		body := `{"n_expert":4,"gen_tokens":1000,"prompt_tokens":0,"layers":[{"layer":0,"gen":` + hits + `,"prompt":[0,0,0,0]}]}`
+		if err := os.WriteFile(filepath.Join(p, name+".json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("chat", "run-1", "[900,50,25,25]")
+	run("coding", "run-2", "[25,25,50,900]")
+	// the active profile is chat, but the latest session there routed like coding
+	run("chat", "run-3", "[30,20,60,890]")
+	os.WriteFile(filepath.Join(dir, "active"), []byte("chat"), 0o644)
+
+	r, err := expertStats(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Profile != "chat" || r.Best != "coding" || len(r.Profiles) != 2 || r.Runs != 2 {
+		t.Fatalf("got profile %q best %q, %+v", r.Profile, r.Best, r)
+	}
+}
+
+func TestMigrateExpertStats(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "run-1.json"), []byte(`{}`), 0o644)
+	migrateExpertStats(dir)
+	if _, err := os.Stat(filepath.Join(dir, defaultExpertProfile, "run-1.json")); err != nil {
+		t.Fatal("run file not moved into the default profile")
+	}
+}

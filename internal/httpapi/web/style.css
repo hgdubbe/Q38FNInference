@@ -353,6 +353,9 @@ input[type=checkbox], input[type=radio] { width: 16px; height: 16px; min-height:
 
 .row { display: flex; align-items: center; gap: var(--s4); flex-wrap: wrap; }
 .row-end { justify-content: flex-end; margin-bottom: var(--s3); }
+#experts { display: flex; flex-direction: column; gap: var(--s4); margin-top: var(--s5); }
+#experts-new-form { flex-wrap: nowrap; gap: var(--s3); }
+#experts-new-form input { width: 16rem; max-width: 50vw; }
 
 pre.log { margin: 0; max-height: 400px; overflow: auto; padding: var(--s4); border: var(--bw) solid var(--border); background: var(--bg);
   font: 12px/1.55 var(--mono); color: var(--muted-fg); white-space: pre-wrap; word-break: break-word; }

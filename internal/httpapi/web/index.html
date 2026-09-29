@@ -162,7 +162,15 @@
       <div class="card only-single" id="experts-card" hidden>
         <div class="card-head">
           <h2>Expert usage</h2>
-          <button id="experts-clear" class="btn btn-link">Clear</button>
+          <button id="experts-clear" class="btn btn-link">Clear this profile</button>
+        </div>
+        <p class="muted small">Record separate profiles for different work (e.g. coding, chat); the model records into the selected one from its next start.</p>
+        <div class="row">
+          <label class="inline-field">Profile <select id="experts-profile"></select></label>
+          <form id="experts-new-form" class="row">
+            <input id="experts-new" placeholder="new profile, e.g. coding" maxlength="40" aria-label="New profile name">
+            <button class="btn btn-secondary btn-sm">Add</button>
+          </form>
         </div>
         <div id="experts"></div>
       </div>

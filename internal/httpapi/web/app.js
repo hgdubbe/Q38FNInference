@@ -1001,11 +1001,25 @@ async function loadExpertStats() {
   let s;
   try { s = await api('GET', '/api/expert-stats?model=' + encodeURIComponent(path)); } catch (_) { return; }
   if (!state.model || state.model.path !== path) return;
-  card.hidden = !s.runs && !ms.expert_stats;
+  const anyRuns = (s.profiles || []).some((p) => p.runs > 0);
+  card.hidden = !anyRuns && !ms.expert_stats;
   $('experts-clear').hidden = !s.runs;
+  const sel = $('experts-profile');
+  if (document.activeElement !== sel) {
+    sel.replaceChildren(...(s.profiles || []).map((p) => new Option(
+      `${p.name} · ${p.tokens.toLocaleString()} tokens` + (p.match ? ` · ${Math.round(100 * p.match)}% alike` : ''), p.name)));
+    sel.value = s.profile;
+  }
   const out = $('experts');
+  let suggest = null;
+  if (s.best && s.best !== s.profile) {
+    suggest = callout(`The latest session routed most like "${s.best}".`, 'info');
+    suggest.appendChild(button(`Record into "${s.best}"`, () => setExpertProfile(s.best), 'btn-secondary btn-sm'));
+  }
   if (!s.runs) {
-    out.replaceChildren(callout('Recording starts the next time this model is started. Then use it as usual for a while.', 'info'));
+    out.replaceChildren(...[suggest, callout(ms.expert_stats
+      ? 'Nothing recorded in this profile yet. Recording goes here from the next start of the model.'
+      : 'Nothing recorded in this profile. Turn on "Record expert usage" in Settings to fill it.', 'info')].filter(Boolean));
     return;
   }
   const ram = s.ram_layers > 0;
@@ -1031,10 +1045,26 @@ async function loadExpertStats() {
   else verdict = 'Close to even: most experts are used about equally, so keeping the busiest ones in VRAM would gain little.';
   out.replaceChildren(
     el('p', 'muted small', `Share of tokens routed to each layer's busiest experts, over ${ram ? `the ${s.ram_layers} layers whose experts are in RAM` : `all ${s.layers} MoE layers`}; ${s.runs} run${s.runs > 1 ? 's' : ''}.`),
-    stats, callout(verdict, 'info'));
+    stats, callout(verdict, 'info'), ...(suggest ? [suggest] : []));
 }
+async function setExpertProfile(name) {
+  if (!state.model) return;
+  try {
+    await api('POST', '/api/expert-stats', { model: state.model.path, profile: name });
+    if (state.status && state.status.Running) toast(`Recording switches to "${name}" at the next start.`, 'ok', 3000);
+  } catch (e) { toast(e.message, 'error'); }
+  loadExpertStats();
+}
+$('experts-profile').addEventListener('change', (e) => setExpertProfile(e.target.value));
+$('experts-new-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const name = $('experts-new').value.trim();
+  if (!name) return;
+  $('experts-new').value = '';
+  setExpertProfile(name);
+});
 $('experts-clear').addEventListener('click', async () => {
-  if (!state.model || !(await confirmDialog('Clear expert usage?', 'Deletes the counts recorded for this model.', 'Clear', true))) return;
+  if (!state.model || !(await confirmDialog('Clear this profile?', 'Deletes the counts recorded in this profile.', 'Clear', true))) return;
   try { await api('DELETE', '/api/expert-stats?model=' + encodeURIComponent(state.model.path)); } catch (e) { toast(e.message, 'error'); }
   loadExpertStats();
 });
