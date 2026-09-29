@@ -193,6 +193,22 @@ Changed:
   `GGML_OP_OFFLOAD_MIN_BATCH=128` (Settings → Model), roughly where a PCIe
   4.0 x16 copy of a large MoE layer and a desktop CPU's prompt throughput
   break even.
+- **QSA indexer skipped while it can't be sparse**
+  (`patches/0003-qwen4exp-qsa-dense-bypass.patch`). On every full-attention
+  layer, llama.cpp's qwen4exp graph ran the whole indexer each token: a
+  64-head query projection, re-pooling and scoring every block of the
+  indexer key cache, and a top-k over every cell. Top-k keeps
+  `min(n_kv, top_k + ratio - 1)` cells, so until the cache outgrows the
+  budget it selects every cell and the result is exactly dense attention.
+  The patch then skips all of it and only stores the indexer key for later;
+  once the cache is larger the graph is rebuilt with the sparse path. It also
+  drops a copy of the whole pooled key cache per layer in the sparse path
+  (the block mean now reads the strided slices directly). Logits are
+  bit-identical to the unpatched build, dense, sparse, and across the switch;
+  on the random-weight test model token generation got 1.55x faster at an
+  empty context and 3.5x at 4096 tokens. On the real model the share is
+  smaller (the experts dominate), but the query projection alone is 12
+  layers x n_embd x 8192 weights read per token for nothing.
 - **RAM check.** The plan warns when the weights kept in RAM exceed physical
   memory (they are memory-mapped and would be re-read from disk per token).
 - **Benchmark** (Run tab): a fixed ~1500-token prompt plus exactly 128
@@ -204,19 +220,21 @@ Looked at and left alone:
 - **The 51B-parameter PLE n-gram table** is already an input-layer tensor in
   llama.cpp (kept in RAM, lazily read through mmap), and the planner already
   counted it as such.
-- **Repacking IQ4_XS for the CPU.** llama.cpp repacks Q4_0/Q4_K/IQ4_NL/...
-  into SIMD-friendly layouts, but not IQ4_XS. Converting to IQ4_NL at load
-  would make it repackable, but IQ4_NL is 6% larger and token generation
-  from RAM is bandwidth-bound, so decoding would get slower; the gain would
-  be in CPU prompt processing, which the offload threshold already sends
-  to the GPU above 128 tokens.
+- **CPU matmul kernels for the RAM-resident experts.** With a CUDA build the
+  CPU-side weights live in pinned host memory, so llama.cpp's repacked CPU
+  layouts are never used; IQ4_XS experts go through its newer tiled matmul
+  (batches of 8+ rows per expert) or the AVX2 dot product, and token
+  generation from RAM is bandwidth-bound either way. (In a CPU-only build
+  the repack path has a real weakness: its MoE matmul runs one token at a
+  time and never uses its batched kernel, making repacked Q4_K experts ~35%
+  slower than unrepacked ones at prompt batches on an AVX-512 CPU. Not this
+  app's path, so not patched.)
 - **CUDA kernels** (gated delta net, MMQ, flash attention) are already
   specialised per architecture; changing them without a GPU to verify
   correctness and speed would be guesswork.
-- **Graph overhead.** A random-weight qwen4exp model runs at ~0.8 ms/token of
-  fixed overhead on this 4-core CPU; the real model's per-token time is
-  dominated by streaming the active experts from RAM, so graph-level
-  micro-optimisation wouldn't be visible.
+- **Other graph work.** The hyper-connection mixers already use fused ops
+  upstream; the remaining small elementwise ops are a few microseconds each
+  on a GPU next to milliseconds of expert streaming.
 
 ## Known limitations / open questions
 
