@@ -146,7 +146,7 @@ does.
 Visually it follows a "kinetic typography" system, all tokens in the `:root`
 block of `web/style.css`: Space Grotesk (bundled in `web/fonts/`, SIL Open
 Font License, so the panel works offline), uppercase display type at poster
-scale (page titles `clamp(3rem, 11vw, 11rem)`, the model state as the
+scale (page titles `clamp(2rem, 5.5vw, 5.5rem)`, the model state as the
 headline), one acid-yellow accent on near-black, flat 2px geometry with no
 radius or shadows, rows and tiles that flood with the accent on hover, and
 two marquees (a live status ticker and the local-model list) built in

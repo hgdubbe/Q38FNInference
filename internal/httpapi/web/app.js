@@ -494,7 +494,7 @@ function modelBadges(g) {
 function renderLocalModels() {
   marquee($('models-marquee'), state.localGroups.length
     ? state.localGroups.map((g) => [g.Name, fmtBytes(g.TotalSize)])
-    : [['No models yet', 'download one below']], 35);
+    : [['No models yet', 'download one below']], 25);
   const box = $('local-models');
   box.textContent = '';
   $('local-count').textContent = state.localGroups.length ? `${state.localGroups.length} model${state.localGroups.length > 1 ? 's' : ''}` : '';
@@ -938,7 +938,7 @@ function renderStatusMarquee() {
   const gpus = selectedGPUs();
   items.push(gpus.length ? gpus.map((g) => g.Name).join(' + ') : 'CPU only');
   if (state.info.api_url) items.push('API ' + state.info.api_url.replace(/^https?:\/\//, ''));
-  marquee($('status-marquee'), items, 90);
+  marquee($('status-marquee'), items, 60);
 }
 
 // ---- run: on-demand models ------------------------------------------------
