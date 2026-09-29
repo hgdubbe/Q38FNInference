@@ -158,6 +158,15 @@
         </details>
       </div>
 
+      <!-- expert usage (patches/0009) -->
+      <div class="card only-single" id="experts-card" hidden>
+        <div class="card-head">
+          <h2>Expert usage</h2>
+          <button id="experts-clear" class="btn btn-link">Clear</button>
+        </div>
+        <div id="experts"></div>
+      </div>
+
       <!-- benchmark -->
       <details class="card disclosure-card" id="bench-card">
         <summary>
@@ -340,6 +349,7 @@
                 <label class="field"><span class="field-label">GPU prompt offload from (tokens)</span><input name="model.offload_min_batch" type="number" min="1" placeholder="128"><small class="help">Prompts this long send RAM-resident weights to the GPU.</small></label>
               </div>
               <label class="check"><input type="checkbox" name="model.qsa_blocks"><span><b>Experimental: whole-block sparse attention</b><small>Qwen3.8 models only. Less GPU memory at long contexts; answers can differ slightly from the reference model.</small></span></label>
+              <label class="check"><input type="checkbox" name="model.expert_stats"><span><b>Record expert usage</b><small>Counts which experts each token is routed to, to see whether keeping the busiest ones in VRAM would help. Shown on the Run page. One-model mode only; slightly slower while on.</small></span></label>
               <label class="field"><span class="field-label">Extra llama-server arguments</span>
                 <input name="model.extra_args" class="mono" placeholder="e.g. --load-mode mmap+mlock">
               </label>

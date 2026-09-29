@@ -368,6 +368,29 @@ Looked at and left alone:
   upstream; the remaining small elementwise ops are a few microseconds each
   on a GPU next to milliseconds of expert streaming.
 
+## Expert usage recording
+
+llama.cpp keeps each layer's experts in one tensor, so a layer's experts
+are either all in VRAM or all in RAM. Whether splitting them (the most-used
+experts on the GPU) would pay off depends on how unevenly the router picks
+them, which nothing in the GGUF says. `patches/0009-moe-expert-usage-stats.patch`
+measures it: with `LLAMA_EXPERT_STATS=<file>` set, each MoE layer's top-k
+selection is kept as a graph output, read back after every batch, and
+counted per layer and expert, separately for prompt batches and one-token
+generation. A background thread rewrites `<file>` as JSON once a second
+while the counts change (and at exit). Output is unchanged; the cost is one
+sync per batch and the lost CUDA top-k fusion, only while enabled.
+
+The launcher sets it with the "Record expert usage" model setting (one-model
+mode; in router mode every model would share one file): each launch writes
+`expert-stats/<model id>/run-<time>.json` in the config directory, plus a
+`.meta` file with how many blocks kept their experts in RAM under that
+launch's plan. The Run page sums a model's runs and shows, for the
+RAM-resident layers, the share of routed tokens that went to each layer's
+busiest 10/25/50% of experts, next to the even-spread baseline. If the
+busiest quarter takes at least half the tokens, hot-expert placement is
+worth building.
+
 ## Known limitations / open questions
 
 - Nothing here has been run against real Qwen3.8-Flash-Next weights or real

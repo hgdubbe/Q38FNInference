@@ -903,6 +903,7 @@ let tuneSeq = 0;
 async function computeTune() {
   const out = $('plan');
   if (!state.model) return;
+  loadExpertStats();
   const seq = ++tuneSeq;
   out.replaceChildren(el('div', 'skeleton'));
   try {
@@ -986,6 +987,58 @@ function renderPlan() {
     out.appendChild(box);
   }
 }
+
+// ---- run: expert usage ------------------------------------------------------
+
+// How evenly the model spreads tokens over its experts, from the counts
+// llama-server records with "Record expert usage" on (patches/0009).
+async function loadExpertStats() {
+  const card = $('experts-card');
+  if (!state.model || !state.cfg) { card.hidden = true; return; }
+  const path = state.model.path;
+  const id = modelId(path);
+  const ms = hasOverride(state.cfg, id) ? state.cfg.model_overrides[id] : (state.cfg.model || {});
+  let s;
+  try { s = await api('GET', '/api/expert-stats?model=' + encodeURIComponent(path)); } catch (_) { return; }
+  if (!state.model || state.model.path !== path) return;
+  card.hidden = !s.runs && !ms.expert_stats;
+  $('experts-clear').hidden = !s.runs;
+  const out = $('experts');
+  if (!s.runs) {
+    out.replaceChildren(callout('Recording starts the next time this model is started. Then use it as usual for a while.', 'info'));
+    return;
+  }
+  const ram = s.ram_layers > 0;
+  const tokens = s.source === 'generation' ? s.gen_tokens : s.prompt_tokens;
+  const stats = el('div', 'stats');
+  const stat = (label, value, unit) => {
+    const t = el('div', 'stat');
+    const v = el('div', 'stat-value', value);
+    if (unit) v.appendChild(el('small', '', unit));
+    t.append(v, el('div', 'stat-label', label));
+    stats.appendChild(t);
+  };
+  stat(s.source === 'generation' ? 'Tokens generated' : 'Prompt tokens', tokens.toLocaleString());
+  for (const c of s.coverage) {
+    const pct = Math.round(100 * c.share);
+    stat(`Go to the busiest ${pct}% of experts (even: ${pct}%)`, String(Math.round(100 * (ram ? c.ram : c.all))), '%');
+  }
+  const top = s.coverage[1] ? (ram ? s.coverage[1].ram : s.coverage[1].all) / s.coverage[1].share : 1;
+  let verdict;
+  if (tokens < 2000) verdict = `Only ${tokens.toLocaleString()} tokens so far; a few thousand give a reliable picture.`;
+  else if (top >= 2) { verdict = 'Strongly skewed: a few experts per layer take most tokens. Keeping those in VRAM would take a large part of the expert work off the CPU.'; }
+  else if (top >= 1.4) verdict = 'Somewhat skewed: keeping the busiest experts in VRAM would help, moderately.';
+  else verdict = 'Close to even: most experts are used about equally, so keeping the busiest ones in VRAM would gain little.';
+  out.replaceChildren(
+    el('p', 'muted small', `Share of tokens routed to each layer's busiest experts, over ${ram ? `the ${s.ram_layers} layers whose experts are in RAM` : `all ${s.layers} MoE layers`}; ${s.runs} run${s.runs > 1 ? 's' : ''}.`),
+    stats, callout(verdict, 'info'));
+}
+$('experts-clear').addEventListener('click', async () => {
+  if (!state.model || !(await confirmDialog('Clear expert usage?', 'Deletes the counts recorded for this model.', 'Clear', true))) return;
+  try { await api('DELETE', '/api/expert-stats?model=' + encodeURIComponent(state.model.path)); } catch (e) { toast(e.message, 'error'); }
+  loadExpertStats();
+});
+setInterval(() => { if (state.status && state.status.Running) loadExpertStats(); }, 10000);
 
 // ---- run: start / stop / status ---------------------------------------------
 

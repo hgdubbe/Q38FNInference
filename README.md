@@ -55,7 +55,9 @@ models go to `%APPDATA%\Q38FNInference\models`.
    performance options (folded away by default), API port, network access
    and key. Changes show a save bar until saved. "Settings for" switches
    between the defaults and one model's own settings (also reachable from
-   the Run page's "Its settings" link).
+   the Run page's "Its settings" link). Under performance options, "Record
+   expert usage" counts how evenly the model uses its MoE experts and shows
+   the result on the Run page (see docs/ARCHITECTURE.md).
 
 ## API
 

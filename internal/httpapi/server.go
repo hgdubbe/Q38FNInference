@@ -144,6 +144,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/benchmark", s.handleBenchmark)
 	mux.HandleFunc("POST /api/router/rescan", s.handleRouterRescan)
 	mux.HandleFunc("GET /api/router/notes", s.handleRouterNotes)
+	mux.HandleFunc("GET /api/expert-stats", s.handleExpertStats)
+	mux.HandleFunc("DELETE /api/expert-stats", s.handleExpertStats)
 
 	// same-origin access to the model API for the control panel's chat tab,
 	// and to the router's model list / load / unload endpoints
@@ -631,7 +633,15 @@ func (s *Server) launch(modelPath string, args []string, devices []int, auto, re
 	}
 	args = append(stripFlags(args, "--host", "--port"), "--host", "127.0.0.1", "--port", strconv.Itoa(port))
 
-	env := append([]string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}, cfg.ModelFor(modelName(modelPath)).Env()...)
+	ms := cfg.ModelFor(modelName(modelPath))
+	env := append([]string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}, ms.Env()...)
+	if ms.ExpertStats {
+		if e, err := expertStatsEnv(modelPath, args); err != nil {
+			log.Printf("httpapi: expert usage recording: %v", err)
+		} else {
+			env = append(env, e)
+		}
+	}
 	if len(devices) > 0 {
 		ids := make([]string, len(devices))
 		for i, d := range devices {

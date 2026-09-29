@@ -91,6 +91,9 @@ type ModelSettings struct {
 	// less compute memory at long contexts, close to but not identical to
 	// the reference selection. Experimental, off by default.
 	QSABlocks bool `json:"qsa_blocks,omitempty"`
+	// ExpertStats records how often each MoE expert is routed to
+	// (patches/0009, LLAMA_EXPERT_STATS; one-model mode only).
+	ExpertStats bool `json:"expert_stats,omitempty"`
 
 	Temperature     *float64 `json:"temperature,omitempty"`
 	TopP            *float64 `json:"top_p,omitempty"`
