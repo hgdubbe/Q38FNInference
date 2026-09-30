@@ -38,6 +38,9 @@
       <button class="nav-btn" data-page="profiling">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Profiling
       </button>
+      <button class="nav-btn" data-page="guide">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5v.01"/></svg>Guide
+      </button>
       <button class="nav-btn" data-page="settings">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>Settings
       </button>
@@ -201,7 +204,7 @@
 
     <!-- ================= PROFILING ================= -->
     <section id="page-profiling" class="page" aria-labelledby="h-profiling">
-      <header class="page-head"><h1 id="h-profiling">Profiling</h1></header>
+      <header class="page-head"><h1 id="h-profiling">Profiling</h1><button class="btn btn-link" data-goto="guide">How this works</button></header>
       <p class="page-lead">A mixture-of-experts model uses only a few of its experts per token, and some far more often than others. Record which ones your work uses, then keep the busiest ones in GPU memory. Everything here belongs to the model chosen below.</p>
 
       <div class="card">
@@ -249,6 +252,74 @@
           </form>
         </div>
         <div id="experts"></div>
+      </div>
+    </section>
+
+    <!-- ================= GUIDE ================= -->
+    <section id="page-guide" class="page" aria-labelledby="h-guide">
+      <header class="page-head"><h1 id="h-guide">Guide</h1></header>
+      <p class="page-lead">What each part of the app does, and how to get the most speed out of a model that doesn't fit in GPU memory.</p>
+
+      <div class="card guide">
+        <div class="card-head"><h2>Getting started</h2></div>
+        <ol>
+          <li><b>Models</b>: download a GGUF model from Hugging Face, or add a folder that has some.</li>
+          <li><b>Run</b>: pick the model and press Start. The app works out which parts go on your GPUs and which stay in RAM, and shows it under "How the model will be loaded".</li>
+          <li>Chat in the built-in window (Open chat), or point any OpenAI- or Anthropic-compatible app at the API address shown on the Run page.</li>
+          <li><b>Settings</b>: system prompt, thinking level, sampling, context length. "Settings for" lets one model have its own values.</li>
+        </ol>
+      </div>
+
+      <div class="card guide">
+        <div class="card-head"><h2>Why speed depends on the experts</h2></div>
+        <p>Models like Qwen3.8-Flash-Next are <b>mixture-of-experts</b> models: each layer has many small "experts", and each word the model writes only uses a few of them. Most of the model's size is experts.</p>
+        <p>When the model is larger than your GPU memory, some experts stay in RAM and the CPU has to read them for every word. That reading is the slowest part, so the fewer experts the CPU has to touch, the faster the model writes.</p>
+        <p>Normally the app puts <b>whole layers</b> of experts on the GPU. But experts are not used equally: often a small share of them does most of the work. Knowing which ones lets the GPU hold <b>the busiest experts of every layer</b> instead, and that is what profiling is for.</p>
+      </div>
+
+      <div class="card guide">
+        <div class="card-head"><h2>Profiles</h2></div>
+        <p>A <b>profile</b> is a record of how often each expert was used. Different work uses different experts (coding uses others than storytelling), so you can keep several profiles per model. Profiles belong to one model.</p>
+        <p>There are two ways to fill a profile:</p>
+        <ul>
+          <li><b>Recording while you use the model.</b> Turn on "Record expert usage" on the Profiling tab. Your use goes into the profile chosen under "Record into", from the moment you choose it.</li>
+          <li><b>Auto-profiling.</b> Tick the use cases you care about and press Start. The app sends typical prompts for each one to the model and records each use case into its own profile ("coding", "roleplay", ...). It takes a few minutes per use case; your running model is stopped meanwhile and started again afterwards.</li>
+        </ul>
+        <p>A profile only changes when something records into it. Profiles made by auto-profiling stay as they are as long as "Record into" points somewhere else (for example "default"), or recording is off.</p>
+      </div>
+
+      <div class="card guide">
+        <div class="card-head"><h2>Hot experts</h2></div>
+        <p>"Keep the most-used experts in GPU memory" uses a profile to decide which experts go on the GPU. All experts still stay in RAM too, so nothing is ever missing: the GPU just handles the busy ones, and the CPU only the rare ones. Answers are the same as without it.</p>
+        <p>"<b>Hot experts from</b>" chooses the profile, each time the model starts:</p>
+        <ul>
+          <li><b>A named profile</b>, e.g. "coding": use it when you know what you are about to do. It is used from the first word on.</li>
+          <li><b>Auto</b>: not a profile of its own, but a rule. It picks the profile your last session looked most like (for that, recording has to be on). Without a last session to compare, it uses the "Record into" profile if that has enough data, otherwise the profile with the most data.</li>
+        </ul>
+        <p>The experts are copied to the GPU when the model loads, so a change here needs a <b>restart of the model</b>. A profile needs at least 1,000 recorded tokens; with less, the app falls back to whole layers and says so in the plan.</p>
+        <p>The plan on the Run page shows what you gain: the share of expert work the hot experts cover, next to what whole layers would have covered.</p>
+      </div>
+
+      <div class="card guide">
+        <div class="card-head"><h2>Recommended setup</h2></div>
+        <ol>
+          <li>Profiling tab: choose your model, run <b>auto-profiling</b> for the use cases you need ("Standard" length is enough).</li>
+          <li>Turn on "<b>Keep the most-used experts in GPU memory</b>".</li>
+          <li>Set "<b>Hot experts from</b>" to the use case you are about to work on, or to Auto.</li>
+          <li>Optional: keep "Record expert usage" on with "Record into: default", so Auto can follow what you actually do. Recording costs a little speed; turn it off when you don't need it.</li>
+          <li>Start (or restart) the model on the Run page, and check the speed with the Speed test there.</li>
+        </ol>
+      </div>
+
+      <div class="card guide">
+        <div class="card-head"><h2>Good to know</h2></div>
+        <ul>
+          <li><b>One-model mode only.</b> Recording and hot experts don't work in "All models, on demand" mode.</li>
+          <li><b>Does it change the answers?</b> No. Only where the experts are computed changes.</li>
+          <li><b>Does recording with hot experts on spoil the profile?</b> No. The model picks the same experts wherever they are stored, so the record stays true.</li>
+          <li><b>Model fits completely on the GPU?</b> Then there is nothing to gain and the plan stays as it is.</li>
+          <li><b>Something wrong after turning hot experts on?</b> Turn the switch off and restart the model: everything is back to the normal plan.</li>
+        </ul>
       </div>
     </section>
 

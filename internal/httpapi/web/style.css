@@ -437,3 +437,9 @@ pre.log { margin: 0; max-height: 400px; overflow: auto; padding: var(--s4); bord
 .ap-failed b, .ap-canceled b { color: var(--danger); }
 .ap-waiting { opacity: .55; }
 @media (max-width: 640px) { .ap-step { grid-template-columns: 1fr; gap: var(--s2); } }
+
+/* guide */
+.guide p, .guide li { max-width: 72ch; line-height: 1.5; color: var(--fg); }
+.guide p + p, .guide p + ul, .guide ul + p, .guide p + ol { margin-top: var(--s3); }
+.guide ul, .guide ol { padding-left: 1.3em; display: flex; flex-direction: column; gap: var(--s2); }
+.guide li::marker { color: var(--accent); font-weight: 700; }
