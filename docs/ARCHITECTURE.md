@@ -328,9 +328,20 @@ Changed:
     spills into shared system memory at a fraction of the speed, so the
     overshoot is saved per model and GPU (`vram_corrections` in the
     config), the model is restarted once with the corrected plan, and later
-    plans keep that memory free. Plans also keep 4% of each card free, and
-    every plan that leaves weights in RAM lists each GPU's budget
-    (free − context − compute − staging − sparse attention − safety).
+    plans keep that memory free. Those buffer lines are only logged from
+    llama-server's log level 4, so the launcher passes `--log-verbosity 4`
+    (at the default level the check had nothing to read).
+  - The reverse: the per-GPU reserves (CUDA context, compute buffers, a
+    safety margin of 512 MiB + 2% of the card) are estimates made before
+    anything loads and left 2 GiB of an 8 GiB card and 4 GiB of a 16 GiB
+    one unused on a real system. After a load whose plan keeps experts in
+    RAM, the launcher reads each GPU's free memory (nvidia-smi); where more
+    than 768 MiB is free, all but 512 MiB of it becomes a negative
+    correction for that model and GPU, and the model is restarted once with
+    the fuller plan. An overflow later drops a negative correction before
+    adding its own. Every plan that leaves weights in RAM lists each GPU's
+    budget (free − context − compute − staging − sparse attention − safety
+    ± learned).
 - **RAM check.** The plan warns when the weights kept in RAM exceed physical
   memory (they are memory-mapped and would be re-read from disk per token).
 - **Benchmark** (Run tab): a fixed ~1500-token prompt plus exactly 128
@@ -442,7 +453,13 @@ Everything about expert usage lives on the Profiling tab and belongs to one
 model: its recording and hot-expert switches (`settings.json` in its
 expert-stats folder; before, these were model settings, which are still
 read while a model has no such file), its profiles, and the choices of
-recording and hot-expert profile.
+recording and hot-expert profile. The page asks one question per card:
+"Hot experts: Off / Auto / <profile>" (switch and profile in one menu,
+with a sentence saying what the next start does and a restart button when
+the running load, whose profile the launcher remembers from the hot-expert
+file's `# profile` line, differs), creating profiles automatically,
+"Record: Off / into <profile> / into a new profile", and a list of profiles
+with how much work their busiest quarter of experts does.
 
 Auto-profiling (`autoprofile.go`) creates one profile per chosen use case
 (assistant, coding, agentic coding, roleplay, storytelling, writing,

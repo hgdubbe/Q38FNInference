@@ -504,6 +504,9 @@ type expertProfileInfo struct {
 	Runs   int     `json:"runs"`
 	Tokens uint64  `json:"tokens"`
 	Match  float64 `json:"match,omitempty"` // similarity to the latest session, if compared
+	// Coverage: share of routed tokens the busiest 10/25/50% of experts
+	// took, over the layers with experts in RAM (all layers if none were)
+	Coverage []float64 `json:"coverage,omitempty"`
 }
 
 type expertStatsResponse struct {
@@ -518,6 +521,10 @@ type expertStatsResponse struct {
 	// the profile that choice means right now.
 	HotProfile  string `json:"hot_profile"`
 	HotResolved string `json:"hot_resolved"`
+	// LoadedHot is the hot-expert profile of the running load of this model:
+	// "off" without hot experts, "fits" when all experts are on GPUs anyway,
+	// "" when it isn't running
+	LoadedHot string `json:"loaded_hot"`
 	// the model's switches (expertModelSettings)
 	Record bool `json:"record"`
 	Hot    bool `json:"hot"`
@@ -596,6 +603,13 @@ func expertStats(modelDir, running string) (expertStatsResponse, error) {
 	for _, name := range names {
 		c := counts(name, false)
 		info := expertProfileInfo{Name: name, Runs: c.runs, Tokens: c.genTokens}
+		for _, cv := range summarizeCounts(c).Coverage {
+			v := cv.All
+			if c.ramLayers > 0 {
+				v = cv.RAM
+			}
+			info.Coverage = append(info.Coverage, v)
+		}
 		if c.genTokens+c.promptTokens > 0 {
 			withData++
 		}
@@ -751,8 +765,14 @@ func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
-		if profile != activeExpertProfile(modelDir) {
-			os.Remove(filepath.Join(modelDir, profile)) // gone from the list once empty
+		if profile == activeExpertProfile(modelDir) && profile != defaultExpertProfile {
+			// recording moves to the default profile rather than bringing this one back
+			os.WriteFile(filepath.Join(modelDir, "active"), []byte(defaultExpertProfile), 0o644)
+			switchLiveProfile(running, defaultExpertProfile)
+		}
+		os.Remove(filepath.Join(modelDir, profile)) // gone from the list once empty
+		if profile == hotExpertProfile(modelDir) {
+			os.Remove(filepath.Join(modelDir, "hot-profile")) // back to auto
 		}
 	}
 	resp, err := expertStats(modelDir, running)
@@ -761,6 +781,11 @@ func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.Live = running != ""
+	s.mu.Lock()
+	if s.current != nil && s.current.modelPath == req.Model && s.llama.Status().Running && s.router == nil {
+		resp.LoadedHot = s.current.hotProfile
+	}
+	s.mu.Unlock()
 	es := readExpertSettings(modelDir, s.Config().ModelFor(modelName(req.Model)))
 	resp.Record, resp.Hot = es.Record, es.Hot
 	resp.HotProfile = hotExpertProfile(modelDir)
@@ -848,7 +873,7 @@ func (s *Server) expertHits(modelPath string) (map[int][]uint64, string) {
 
 // writeHotExperts saves a plan's hot experts in patches/0010's format, one
 // "<block>: <expert> ..." line per block.
-func writeHotExperts(modelPath string, hot map[int][]int) (string, error) {
+func writeHotExperts(modelPath, profile string, hot map[int][]int) (string, error) {
 	modelDir, err := expertModelDir(modelPath)
 	if err != nil {
 		return "", err
@@ -862,6 +887,7 @@ func writeHotExperts(modelPath string, hot map[int][]int) (string, error) {
 	}
 	sort.Ints(blocks)
 	var sb strings.Builder
+	sb.WriteString(hotProfileHeader + profile + "\n") // no colon: llama.cpp skips the line
 	for _, b := range blocks {
 		sb.WriteString(strconv.Itoa(b) + ":")
 		for _, e := range hot[b] {
@@ -916,4 +942,16 @@ func (s *Server) recordExperts(modelPath string, ms appconfig.ModelSettings) boo
 func (s *Server) hotExperts(modelPath string, ms appconfig.ModelSettings) bool {
 	dir, err := expertModelDir(modelPath)
 	return err == nil && readExpertSettings(dir, ms).Hot
+}
+
+const hotProfileHeader = "# profile "
+
+// hotFileProfile reads which profile a hot-expert file was made from.
+func hotFileProfile(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(string(b), "\n")
+	return strings.TrimPrefix(line, hotProfileHeader)
 }

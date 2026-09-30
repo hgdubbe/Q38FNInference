@@ -484,7 +484,7 @@ func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU, hot bool) (*tuneR
 	}
 	if plan.HotExperts != nil {
 		plan.Notes = append(plan.Notes, fmt.Sprintf("hot experts chosen from expert-usage profile %q", hotFrom))
-		if f, err := writeHotExperts(modelPath, plan.HotExperts); err != nil {
+		if f, err := writeHotExperts(modelPath, hotFrom, plan.HotExperts); err != nil {
 			plan.Notes = append(plan.Notes, "could not save the hot-expert list: "+err.Error())
 		} else {
 			args = append(args, hotExpertsFlag, f)
@@ -662,10 +662,19 @@ func (s *Server) launch(modelPath string, args []string, devices []int, auto, re
 		return server.Status{}, httpError{http.StatusInternalServerError, err}
 	}
 	args = append(stripFlags(args, "--host", "--port"), "--host", "127.0.0.1", "--port", strconv.Itoa(port))
+	if !slices.ContainsFunc(args, func(a string) bool { return a == "-lv" || a == "--verbosity" || a == "--log-verbosity" }) {
+		// the per-device buffer sizes the VRAM check reads are only logged from level 4
+		args = append(args, "--log-verbosity", "4")
+	}
 
 	ms := cfg.ModelFor(modelName(modelPath))
 	env := append([]string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}, ms.Env()...)
+	hotProfile := "off"
+	if !slices.Contains(args, "--n-cpu-moe") {
+		hotProfile = "fits" // every expert is on a GPU already
+	}
 	if f := flagValue(args, hotExpertsFlag); f != "" {
+		hotProfile = hotFileProfile(f)
 		env = append(env, "LLAMA_MOE_HOT="+f)
 		args = stripFlags(args, hotExpertsFlag)
 	}
@@ -686,7 +695,7 @@ func (s *Server) launch(modelPath string, args []string, devices []int, auto, re
 	}
 
 	// free memory per GPU just before the load, in CUDA ordinal order
-	li := launchInfo{modelPath: modelPath, auto: auto, recheck: recheck}
+	li := launchInfo{modelPath: modelPath, auto: auto, recheck: recheck, limited: slices.Contains(args, "--n-cpu-moe"), hotProfile: hotProfile}
 	if all, err := gpu.Detect(); err == nil {
 		for _, d := range devices {
 			for _, g := range all {

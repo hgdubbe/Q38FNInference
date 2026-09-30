@@ -52,3 +52,12 @@ func TestLoadLogsStartsAtLastLaunch(t *testing.T) {
 		t.Errorf("loadLogs = %v, want [b]", got)
 	}
 }
+
+func TestVRAMSlackOnlyAboveThreshold(t *testing.T) {
+	li := launchInfo{devices: []tuning.GPU{{Index: 0}, {Index: 1}}}
+	now := []tuning.GPU{{Index: 0, FreeBytes: 4 << 30}, {Index: 1, FreeBytes: 600 << 20}}
+	got := vramSlack(li, now)
+	if len(got) != 1 || got[0] != (4<<30)-slackKeep {
+		t.Errorf("slack = %v, want only GPU 0 with 4 GiB - %d", got, slackKeep)
+	}
+}

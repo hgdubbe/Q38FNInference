@@ -304,12 +304,12 @@ func TestExtraReserveAndMarginMoveExpertsOffGPU(t *testing.T) {
 		t.Fatal(err)
 	}
 	// a learned 1 GiB correction for this GPU costs exactly one block's experts
-	corr, _ := Compute(m, []GPU{{Index: 3, FreeBytes: free}}, Options{NoOpOffload: true, UBatch: 512, ExtraReserve: map[int]uint64{3: 1 * GiB}})
+	corr, _ := Compute(m, []GPU{{Index: 3, FreeBytes: free}}, Options{NoOpOffload: true, UBatch: 512, ExtraReserve: map[int]int64{3: 1 * GiB}})
 	if corr.NCPUMoE != base.NCPUMoE+1 {
 		t.Errorf("with correction ncmoe = %d, want %d", corr.NCPUMoE, base.NCPUMoE+1)
 	}
 	// corrections for another GPU don't apply
-	other, _ := Compute(m, []GPU{{Index: 3, FreeBytes: free}}, Options{NoOpOffload: true, UBatch: 512, ExtraReserve: map[int]uint64{0: 1 * GiB}})
+	other, _ := Compute(m, []GPU{{Index: 3, FreeBytes: free}}, Options{NoOpOffload: true, UBatch: 512, ExtraReserve: map[int]int64{0: 1 * GiB}})
 	if other.NCPUMoE != base.NCPUMoE {
 		t.Errorf("another GPU's correction changed the plan: ncmoe %d vs %d", other.NCPUMoE, base.NCPUMoE)
 	}
@@ -362,5 +362,15 @@ func TestHotExpertsFillSpareMemoryWhenAllExpertsAreInRAM(t *testing.T) {
 	}
 	if p.NCPUMoE != 8 || p.WholeLayerShare != 0 || len(p.HotExperts[0]) != 4 || p.HotExperts[0][0] != 7 {
 		t.Errorf("ncmoe=%d hot=%v whole=%.2f, want 8, block 0's 4 busiest starting with 7, 0", p.NCPUMoE, p.HotExperts, p.WholeLayerShare)
+	}
+}
+
+func TestNegativeExtraReserveGivesMoreRoom(t *testing.T) {
+	m := synthModel(8, 1*GiB, 10*MiB, 10*MiB)
+	free := overhead(true) + 3*GiB + 100*MiB
+	base, _ := Compute(m, []GPU{{Index: 0, FreeBytes: free}}, Options{NoOpOffload: true, UBatch: 512})
+	more, _ := Compute(m, []GPU{{Index: 0, FreeBytes: free}}, Options{NoOpOffload: true, UBatch: 512, ExtraReserve: map[int]int64{0: -1 * GiB}})
+	if more.NCPUMoE != base.NCPUMoE-1 {
+		t.Errorf("ncmoe %d with 1 GiB measured unused, want %d", more.NCPUMoE, base.NCPUMoE-1)
 	}
 }

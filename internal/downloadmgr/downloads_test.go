@@ -69,8 +69,19 @@ func TestListReturnsAllDownloads(t *testing.T) {
 	m.Start(context.Background(), "repo", "a.gguf", filepath.Join(dir, "a.gguf"))
 	m.Start(context.Background(), "repo", "b.gguf", filepath.Join(dir, "b.gguf"))
 
+	// wait for both to finish too: they write into dir, which the test's
+	// cleanup removes
+	finished := func() bool {
+		l := m.List()
+		for _, d := range l {
+			if d.State != StateDone && d.State != StateError {
+				return false
+			}
+		}
+		return len(l) == 2
+	}
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(m.List()) < 2 {
+	for time.Now().Before(deadline) && !finished() {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if got := len(m.List()); got != 2 {

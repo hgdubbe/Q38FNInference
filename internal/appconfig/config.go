@@ -33,10 +33,11 @@ type Config struct {
 	// GPUs lists the nvidia-smi indices to use; empty means all of them.
 	GPUs []int `json:"gpus,omitempty"`
 
-	// VRAMCorrections is extra VRAM, in bytes, the planner keeps free per
-	// model and GPU ("<model path>#<gpu index>"), learned when a load used
-	// more than the plan expected (see httpapi's VRAM check).
-	VRAMCorrections map[string]uint64 `json:"vram_corrections,omitempty"`
+	// VRAMCorrections adjusts, in bytes, the VRAM the planner keeps free per
+	// model and GPU ("<model path>#<gpu index>"), measured after loads (see
+	// httpapi's VRAM check): positive after a load used more than planned,
+	// negative when a load left memory unused.
+	VRAMCorrections map[string]int64 `json:"vram_corrections,omitempty"`
 
 	// SystemPrompt is injected by the API proxy according to SystemPromptMode
 	// ("off", "default": only when a request has none, "override": always).

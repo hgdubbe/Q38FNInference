@@ -100,9 +100,9 @@ type Options struct {
 	// weights are never copied to the GPU and need no staging VRAM.
 	NoOpOffload bool
 
-	// ExtraReserve is additional VRAM to keep free per GPU index, learned
-	// from earlier loads that used more than planned.
-	ExtraReserve map[int]uint64
+	// ExtraReserve adjusts the VRAM kept free per GPU index, learned from
+	// earlier loads: more after an overflow, less where memory went unused.
+	ExtraReserve map[int]int64
 
 	// qsaCells is the context size when the QSA sparse path can run (the
 	// cache can outgrow the indexer budget), else 0; see qsaComputeBytes.
@@ -404,9 +404,10 @@ func deviceBudgets(gpus []GPU, opt Options, ub int, staging uint64) []int64 {
 		// the estimates above are model-independent guesses; keep a margin
 		// that scales with the card, since overshooting VRAM on Windows
 		// doesn't fail but spills into shared memory at a fraction of the speed
-		compute += g.TotalBytes / 25
-		compute += opt.ExtraReserve[g.Index]
-		budgets[d] = int64(g.FreeBytes) - int64(cudaContextBytes+compute+opt.ReserveBytes)
+		compute += g.TotalBytes / 50
+		b := int64(g.FreeBytes) - int64(cudaContextBytes+compute+opt.ReserveBytes) - opt.ExtraReserve[g.Index]
+		// a learned reduction can't hand out the CUDA context's memory
+		budgets[d] = min(b, int64(g.FreeBytes)-int64(cudaContextBytes))
 	}
 	return budgets
 }
@@ -428,13 +429,17 @@ func budgetNote(g GPU, main bool, opt Options, ub int, staging uint64) string {
 		out += fmt.Sprintf(" − %s sparse attention (%d-token context × %d micro-batch)", gib(q), opt.qsaCells, ub)
 		used += q
 	}
-	out += " − " + gib(opt.ReserveBytes+g.TotalBytes/25) + " safety"
-	used += g.TotalBytes / 25
-	if e := opt.ExtraReserve[g.Index]; e > 0 {
-		out += " − " + gib(e) + " learned from an earlier overflow"
-		used += e
-	}
+	out += " − " + gib(opt.ReserveBytes+g.TotalBytes/50) + " safety"
+	used += g.TotalBytes / 50
 	left := int64(g.FreeBytes) - int64(used)
+	switch e := opt.ExtraReserve[g.Index]; {
+	case e > 0:
+		out += " − " + gib(uint64(e)) + " learned from an earlier overflow"
+		left -= e
+	case e < 0:
+		out += " + " + gib(uint64(-e)) + " measured unused on an earlier load"
+		left -= e
+	}
 	return out + fmt.Sprintf(" = %.1f GiB for model layers", float64(left)/GiB)
 }
 

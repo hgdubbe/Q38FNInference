@@ -1007,110 +1007,133 @@ function renderProfModels() {
 }
 $('prof-model').addEventListener('change', () => loadExpertStats());
 
+// set when the hot-expert choice changes while the model runs, to offer a restart
+let profChanged = false;
+
 async function loadExpertStats() {
   const path = profModel();
   if (!path || !state.cfg) return;
   let s;
   try { s = await api('GET', '/api/expert-stats?model=' + encodeURIComponent(path)); } catch (_) { return; }
   if (profModel() !== path) return;
-  const ms = { expert_stats: s.record, hot_experts: s.hot };
-  $('prof-record').checked = s.record;
-  $('prof-hot').checked = s.hot;
-  $('experts-clear').hidden = !s.runs;
-  const sel = $('experts-profile');
-  if (document.activeElement !== sel) {
-    sel.replaceChildren(...(s.profiles || []).map((p) => new Option(
-      `${p.name} · ${p.tokens.toLocaleString()} tokens` + (p.match ? ` · ${Math.round(100 * p.match)}% alike` : ''), p.name)));
-    sel.value = s.profile;
-  }
-  const hotSel = $('experts-hot');
-  hotSel.closest('label').hidden = !ms.hot_experts;
+  const withData = (s.profiles || []).filter((p) => p.tokens > 0);
+  const tok = (n) => `${n.toLocaleString()} token${n === 1 ? '' : 's'}`;
+
+  // Speed up: one menu for on/off and the profile
+  const hotSel = $('prof-hot-sel');
   if (document.activeElement !== hotSel) {
-    hotSel.replaceChildren(new Option(`Auto (now: ${s.hot_resolved || s.profile})`, ''),
-      ...(s.profiles || []).map((p) => new Option(p.name, p.name)));
-    hotSel.value = s.hot_profile || '';
+    hotSel.replaceChildren(
+      new Option('Off', 'off'),
+      new Option(`Auto${s.hot_resolved ? ` (now: ${s.hot_resolved})` : ''}`, 'auto'),
+      ...withData.map((p) => new Option(`${p.name} (${tok(p.tokens)})`, 'p:' + p.name)));
+    hotSel.value = !s.hot ? 'off' : s.hot_profile ? 'p:' + s.hot_profile : 'auto';
+    if (hotSel.selectedIndex < 0) hotSel.value = 'auto';
   }
-  const out = $('experts');
-  let suggest = null;
-  if (s.best && s.best !== s.profile) {
-    suggest = callout(`The latest session routed most like "${s.best}".`, 'info');
-    suggest.appendChild(button(`Record into "${s.best}"`, () => setExpertProfile(s.best), 'btn-secondary btn-sm'));
+  const chosen = s.hot ? (s.hot_profile || s.hot_resolved) : '';
+  const info = (s.profiles || []).find((p) => p.name === chosen);
+  let status;
+  if (!s.hot) status = withData.length ? 'Off: the GPUs hold whole layers of experts, as usual.' : 'Off. Create profiles below first, then choose one here.';
+  else if (!info || info.tokens < 1000) status = `Not enough data in "${chosen || 'the profile'}" yet (${tok(info ? info.tokens : 0)} of 1,000): the model loads as usual. Create profiles below.`;
+  else status = `On: the next start keeps the busiest experts of "${chosen}" on the GPU${s.hot_profile ? '' : ' (chosen automatically)'}.`;
+  $('prof-hot-status').textContent = status;
+  // what the running load uses, and a restart after the choice changed while it runs
+  const want = s.hot && info && info.tokens >= 1000 ? chosen : 'off';
+  if (s.loaded_hot === 'fits') {
+    $('prof-hot-status').textContent = 'The running model fits in GPU memory completely: hot experts aren\'t needed.';
+  } else if (s.loaded_hot && s.loaded_hot !== want) {
+    $('prof-hot-status').textContent += ' The running model still uses ' + (s.loaded_hot === 'off' ? 'no hot experts' : `"${s.loaded_hot}"`) + '.';
   }
-  if (!s.runs) {
-    out.replaceChildren(...[suggest, callout(s.live
-      ? 'Recording into this profile now. Use the model as usual; the numbers appear as tokens come in.'
-      : ms.expert_stats
-        ? 'Nothing recorded in this profile yet. Recording starts when the model is started.'
-        : 'Nothing recorded in this profile. Turn on "Record expert usage" in Settings (then restart the model) to fill it.', 'info')].filter(Boolean));
+  if (!s.loaded_hot) profChanged = false;
+  $('prof-restart').hidden = !profChanged || !s.loaded_hot || s.loaded_hot === 'fits' || s.loaded_hot === want;
+
+  // Learn from your own use: one menu for off/profile/new
+  const recSel = $('prof-rec-sel');
+  if (document.activeElement !== recSel) {
+    const names = (s.profiles || []).map((p) => p.name);
+    if (!names.includes(s.profile)) names.push(s.profile);
+    recSel.replaceChildren(new Option('Off', 'off'),
+      ...names.map((n) => new Option(`Into "${n}"`, 'p:' + n)),
+      new Option('Into a new profile…', 'new'));
+    recSel.value = s.record ? 'p:' + s.profile : 'off';
+  }
+
+  // Profiles list
+  const list = $('prof-list');
+  if (!(s.profiles || []).length) {
+    list.replaceChildren(empty('No profiles yet', 'Create some automatically above, or record your own use.'));
     return;
   }
-  const ram = s.ram_layers > 0;
-  const tokens = s.source === 'generation' ? s.gen_tokens : s.prompt_tokens;
-  const stats = el('div', 'stats');
-  const stat = (label, value, unit) => {
-    const t = el('div', 'stat');
-    const v = el('div', 'stat-value', value);
-    if (unit) v.appendChild(el('small', '', unit));
-    t.append(v, el('div', 'stat-label', label));
-    stats.appendChild(t);
-  };
-  stat(s.source === 'generation' ? 'Tokens generated' : 'Prompt tokens', tokens.toLocaleString());
-  for (const c of s.coverage) {
-    const pct = Math.round(100 * c.share);
-    stat(`Go to the busiest ${pct}% of experts (even: ${pct}%)`, String(Math.round(100 * (ram ? c.ram : c.all))), '%');
-  }
-  const top = s.coverage[1] ? (ram ? s.coverage[1].ram : s.coverage[1].all) / s.coverage[1].share : 1;
-  let verdict;
-  if (tokens < 2000) verdict = `Only ${tokens.toLocaleString()} tokens so far; a few thousand give a reliable picture.`;
-  else if (top >= 2) { verdict = 'Strongly skewed: a few experts per layer take most tokens. Keeping those in VRAM would take a large part of the expert work off the CPU.'; }
-  else if (top >= 1.4) verdict = 'Somewhat skewed: keeping the busiest experts in VRAM would help, moderately.';
-  else verdict = 'Close to even: most experts are used about equally, so keeping the busiest ones in VRAM would gain little.';
-  out.replaceChildren(
-    el('p', 'muted small', `Share of tokens routed to each layer's busiest experts, over ${ram ? `the ${s.ram_layers} layers whose experts are in RAM` : `all ${s.layers} MoE layers`}; ${s.runs} run${s.runs > 1 ? 's' : ''}.`),
-    stats, callout(verdict, 'info'), ...(suggest ? [suggest] : []));
+  list.replaceChildren(...s.profiles.map((p) => {
+    const row = el('div', 'prof-row');
+    const name = el('div', 'prof-name');
+    name.appendChild(el('b', '', p.name));
+    if (s.hot && p.name === chosen) name.appendChild(badge('hot experts', 'accent'));
+    if (s.record && p.name === s.profile) name.appendChild(badge(s.live ? 'recording now' : 'records here'));
+    if (s.best && p.name === s.best) name.appendChild(badge('closest to your last session'));
+    const top = p.coverage && p.coverage[1];
+    const bar = el('div', 'meter');
+    const fill = el('span', 'm-model');
+    fill.style.width = (p.tokens < 1000 ? 0 : Math.round(100 * (top || 0))) + '%';
+    bar.appendChild(fill);
+    const what = p.tokens < 1000 ? `${tok(p.tokens)}: too few to use yet`
+      : `${tok(p.tokens)} · busiest quarter of experts does ${Math.round(100 * top)}% of the work`;
+    const del = button('Delete', async () => {
+      if (!(await confirmDialog(`Delete "${p.name}"?`, 'Its recorded expert usage is removed.', 'Delete', true))) return;
+      try { await api('DELETE', `/api/expert-stats?model=${encodeURIComponent(path)}&profile=${encodeURIComponent(p.name)}`); } catch (e) { toast(e.message, 'error'); }
+      loadExpertStats();
+    }, 'btn-ghost btn-xs');
+    row.append(name, bar, el('span', 'muted small', what), del);
+    return row;
+  }));
 }
-async function setExpertProfile(name) {
-  if (!profModel()) return;
-  try {
-    await api('POST', '/api/expert-stats', { model: profModel(), profile: name });
-  } catch (e) { toast(e.message, 'error'); }
-  loadExpertStats();
+
+async function postExpert(body) {
+  try { await api('POST', '/api/expert-stats', { model: profModel(), ...body }); return true; } catch (e) { toast(e.message, 'error'); return false; }
 }
-$('experts-profile').addEventListener('change', (e) => setExpertProfile(e.target.value));
-$('experts-hot').addEventListener('change', async (e) => {
-  if (!profModel()) return;
-  try {
-    await api('POST', '/api/expert-stats', { model: profModel(), hot_profile: e.target.value });
-    toast(state.status && state.status.Running ? 'Hot experts are loaded at start: restart the model to use this profile.' : 'Used from the next start.', 'ok', 3500);
-  } catch (err) { toast(err.message, 'error'); }
-  loadExpertStats();
+
+$('prof-hot-sel').addEventListener('change', async (e) => {
+  const v = e.target.value;
+  profChanged = true;
+  if (v === 'off') await postExpert({ hot: false });
+  else if (await postExpert({ hot: true })) await postExpert({ hot_profile: v === 'auto' ? '' : v.slice(2) });
+  await loadExpertStats();
   if (state.model && state.model.path === profModel()) computeTune();
 });
-$('experts-new-form').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const name = $('experts-new').value.trim();
-  if (!name) return;
-  $('experts-new').value = '';
-  setExpertProfile(name);
+
+$('prof-restart').addEventListener('click', async () => {
+  const path = profModel();
+  $('prof-restart').disabled = true;
+  try {
+    await api('POST', '/api/server/stop');
+    await api('POST', '/api/server/start', { model_path: path, devices: [] });
+    profChanged = false;
+    toast('Restarting with the new hot-expert choice.', 'ok', 3000);
+  } catch (e) { toast(e.message, 'error'); }
+  $('prof-restart').disabled = false;
+  refreshServerStatus();
+  loadExpertStats();
 });
-$('experts-clear').addEventListener('click', async () => {
-  if (!profModel() || !(await confirmDialog('Clear this profile?', 'Deletes the counts recorded in this profile.', 'Clear', true))) return;
-  try { await api('DELETE', '/api/expert-stats?model=' + encodeURIComponent(profModel())); } catch (e) { toast(e.message, 'error'); }
+
+$('prof-rec-sel').addEventListener('change', async (e) => {
+  const v = e.target.value;
+  $('prof-rec-new-form').hidden = v !== 'new';
+  if (v === 'new') { $('prof-rec-new').focus(); return; }
+  if (v === 'off') await postExpert({ record: false });
+  else if (await postExpert({ record: true })) await postExpert({ profile: v.slice(2) });
+  if (state.status && state.status.Running && v !== 'off') toast('Recording starts with the next start of the model if it was off.', 'ok', 3000);
+  loadExpertStats();
+});
+$('prof-rec-new-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = $('prof-rec-new').value.trim();
+  if (!name) return;
+  if (await postExpert({ record: true }) && await postExpert({ profile: name })) {
+    $('prof-rec-new').value = '';
+    $('prof-rec-new-form').hidden = true;
+  }
   loadExpertStats();
 });
 setInterval(() => { if (state.status && state.status.Running && $('page-profiling').classList.contains('active')) loadExpertStats(); }, 10000);
-
-for (const [box, key] of [['prof-record', 'record'], ['prof-hot', 'hot']]) {
-  $(box).addEventListener('change', async (e) => {
-    if (!profModel()) return;
-    try {
-      await api('POST', '/api/expert-stats', { model: profModel(), [key]: e.target.checked });
-      if (state.status && state.status.Running) toast('Applies from the next start of the model.', 'ok', 3000);
-    } catch (err) { toast(err.message, 'error'); e.target.checked = !e.target.checked; }
-    loadExpertStats();
-    if (state.model && state.model.path === profModel()) computeTune();
-  });
-}
 
 // ---- profiling: auto-profiling ------------------------------------------------
 
@@ -1426,25 +1449,79 @@ $('bench-run').addEventListener('click', async () => {
 
 // ---- log --------------------------------------------------------------------
 
+// llama-server runs at a detailed log level, which the launcher's own checks
+// read; the log shows a readable summary unless "All details" is ticked.
+const logLines = [];
+
+const gib = (mib) => (mib / 1024 >= 0.1 ? `${(mib / 1024).toFixed(1)} GiB` : `${Math.round(mib)} MiB`);
+const deviceName = (d) => (/^CPU/.test(d) ? 'RAM' : d);
+
+function friendlyLog(line) {
+  if (line.startsWith('[launcher] ')) {
+    const t = line.slice(11);
+    return t === 'starting llama-server' ? 'Starting the model…' : t;
+  }
+  const m = line.match(/^[\d.]+ ([IWED]) +(.*)$/);
+  const level = m ? m[1] : '';
+  const text = (m ? m[2] : line).trim();
+  const body = text.replace(/^\S+\s+\S+:\s*/, '').replace(/^id +\d+ \| task -?\d+ \| */, '');
+  if (level === 'E') return 'Error: ' + body;
+  if (level === 'W') return /security: no API key/.test(text) ? null : 'Warning: ' + body;
+  if (!m && /\b(error|failed|warning)\b/i.test(text)) return text;
+  let t;
+  if ((t = text.match(/prompt eval time = +[\d.]+ ms \/ +(\d+) tokens.*?([\d.]+) tokens per second/))) {
+    return `Read the prompt: ${t[1]} tokens, ${(+t[2]).toFixed(1)} tokens/s`;
+  }
+  if ((t = text.match(/\beval time = +[\d.]+ ms \/ +(\d+) tokens.*?([\d.]+) tokens per second/))) {
+    return `Wrote the answer: ${t[1]} tokens, ${(+t[2]).toFixed(1)} tokens/s`;
+  }
+  if ((t = text.match(/(\S+) model buffer size = +([\d.]+) MiB( \(hot experts\))?/)) && +t[2] >= 1) {
+    return `${deviceName(t[1])}: ${gib(+t[2])} of ${t[3] ? 'hot experts' : 'model weights'}`;
+  }
+  if ((t = text.match(/(\S+) (KV|RS) buffer size = +([\d.]+) MiB/)) && +t[3] >= 1) {
+    return `${deviceName(t[1])}: ${gib(+t[3])} of ${t[2] === 'KV' ? 'context cache' : 'recurrent state'}`;
+  }
+  if ((t = text.match(/(\S+) compute buffer size = +([\d.]+) MiB/)) && +t[2] >= 1) {
+    return `${deviceName(t[1])}: ${gib(+t[2])} of working memory`;
+  }
+  if ((t = text.match(/loading model '(.*)'/))) return 'Loading ' + t[1].split(/[\\/]/).pop();
+  if (/llama_server: model loaded/.test(text)) return 'Model loaded and ready.';
+  if ((t = text.match(/hot experts for (\d+) layers/))) return `Hot experts on the GPU for ${t[1]} layers`;
+  if (/recording MoE expert usage/.test(text)) return 'Recording expert usage';
+  return null;
+}
+
+function renderLog() {
+  const box = $('server-log');
+  const details = $('log-details').checked;
+  box.textContent = logLines.map((l) => (details ? l : friendlyLog(l))).filter((l) => l != null).join('\n') + '\n';
+  box.scrollTop = box.scrollHeight;
+}
+
 function streamLogs() {
   const box = $('server-log');
   const es = new EventSource('/api/server/logs/stream');
   es.onmessage = (ev) => {
     const line = JSON.parse(ev.data);
+    logLines.push(line);
+    if (logLines.length > 6000) logLines.splice(0, 1000);
+    const shown = $('log-details').checked ? line : friendlyLog(line);
+    const friendly = friendlyLog(line);
+    if (friendly) { state.lastLog = friendly; $('log-last').textContent = friendly; }
+    if (shown == null) return;
     const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
-    box.textContent += line + '\n';
+    box.textContent += shown + '\n';
     if (box.textContent.length > 400000) box.textContent = box.textContent.slice(-300000);
     if (atBottom) box.scrollTop = box.scrollHeight;
-    const clean = line.replace(/^\S+:\s*/, '').trim();
-    if (clean) { state.lastLog = clean; $('log-last').textContent = clean; }
   };
   es.onerror = () => { es.close(); setTimeout(streamLogs, 2000); };
 }
+$('log-details').addEventListener('change', renderLog);
 $('log-copy').addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText($('server-log').textContent); toast('Log copied.', 'ok', 2000); }
+  try { await navigator.clipboard.writeText(logLines.join('\n') + '\n'); toast('Full log copied.', 'ok', 2000); }
   catch (_) { toast('Copy failed.', 'warn'); }
 });
-$('log-clear').addEventListener('click', () => { $('server-log').textContent = ''; });
+$('log-clear').addEventListener('click', () => { logLines.length = 0; $('server-log').textContent = ''; });
 
 function remeasureMarquees() {
   document.querySelectorAll('.page.active .marquee').forEach((m) => {
