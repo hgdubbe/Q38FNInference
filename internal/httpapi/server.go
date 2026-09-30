@@ -62,8 +62,9 @@ type Server struct {
 	notice   string // see statusResponse.Notice
 	noticeID int
 
-	current    *launchInfo // the single-model load that is running, for plans made meanwhile
-	expertLive string      // live expert-usage run file of the running model, if it records
+	current    *launchInfo     // the single-model load that is running, for plans made meanwhile
+	expertLive string          // live expert-usage run file of the running model, if it records
+	autoProf   *autoProfileJob // the auto-profiling run, while one is active (autoprofile.go)
 
 	// open control-panel tabs, counted by their log-stream connections
 	panels     int
@@ -148,6 +149,9 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/expert-stats", s.handleExpertStats)
 	mux.HandleFunc("DELETE /api/expert-stats", s.handleExpertStats)
 	mux.HandleFunc("POST /api/expert-stats", s.handleExpertStats)
+	mux.HandleFunc("GET /api/autoprofile", s.handleAutoProfile)
+	mux.HandleFunc("POST /api/autoprofile", s.handleAutoProfile)
+	mux.HandleFunc("DELETE /api/autoprofile", s.handleAutoProfile)
 
 	// same-origin access to the model API for the control panel's chat tab,
 	// and to the router's model list / load / unload endpoints
@@ -444,7 +448,8 @@ func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU, hot bool) (*tuneR
 	ms := s.Config().ModelFor(modelName(modelPath))
 	var hits map[int][]uint64
 	hotFrom := ""
-	if hot && ms.HotExperts {
+	hot = hot && s.hotExperts(modelPath, ms) && !s.autoProfiling()
+	if hot {
 		hits, hotFrom = s.expertHits(modelPath)
 	}
 	plan, err := tuning.Compute(meta, gpus, tuning.Options{
@@ -474,7 +479,7 @@ func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU, hot bool) (*tuneR
 		level = reasoning.High
 	}
 	args := append(plan.Args(modelPath), cacheRAMArgs(plan, mem)...)
-	if hot && ms.HotExperts && hits == nil {
+	if hot && hits == nil {
 		plan.Notes = append(plan.Notes, fmt.Sprintf("hot experts: profile %q has fewer than %d recorded tokens; planning whole layers instead", hotFrom, minHotTokens))
 	}
 	if plan.HotExperts != nil {
@@ -588,6 +593,10 @@ type startRequest struct {
 }
 
 func (s *Server) handleServerStart(w http.ResponseWriter, r *http.Request) {
+	if s.autoProfiling() {
+		writeErr(w, http.StatusConflict, fmt.Errorf("auto-profiling is running; wait for it or cancel it on the Profiling page"))
+		return
+	}
 	var req startRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -661,8 +670,8 @@ func (s *Server) launch(modelPath string, args []string, devices []int, auto, re
 		args = stripFlags(args, hotExpertsFlag)
 	}
 	live := ""
-	if ms.ExpertStats {
-		if e, run, err := expertStatsEnv(modelPath, args); err != nil {
+	if auto := s.autoProfiling(); s.recordExperts(modelPath, ms) || auto {
+		if e, run, err := expertStatsEnv(modelPath, args, auto); err != nil {
 			log.Printf("httpapi: expert usage recording: %v", err)
 		} else {
 			env, live = append(env, e), run
@@ -699,7 +708,14 @@ func (s *Server) launch(modelPath string, args []string, devices []int, auto, re
 	st := s.llama.Status()
 	target := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
 	s.setRouter(nil)
-	s.Proxy.SetTarget(target)
+	s.mu.Lock()
+	li.target = target
+	s.mu.Unlock()
+	if s.autoProfiling() {
+		s.Proxy.SetTarget(nil) // API clients would mix their requests into the profiles
+	} else {
+		s.Proxy.SetTarget(target)
+	}
 	go s.watch(st.PID, target, &li)
 	return st, nil
 }
@@ -726,7 +742,7 @@ func (s *Server) watch(pid int, target *url.URL, li *launchInfo) {
 						return // replaced by a corrected load
 					}
 					s.llama.MarkReady(pid)
-					if s.Config().OpenChatOnReady && s.hooks.OpenURL != nil {
+					if s.Config().OpenChatOnReady && s.hooks.OpenURL != nil && !s.autoProfiling() {
 						s.hooks.OpenURL(s.apiURL() + "/")
 					}
 				}
@@ -760,6 +776,10 @@ func stripFlags(args []string, flags ...string) []string {
 }
 
 func (s *Server) handleServerStop(w http.ResponseWriter, r *http.Request) {
+	if s.autoProfiling() {
+		writeErr(w, http.StatusConflict, fmt.Errorf("auto-profiling is running; cancel it on the Profiling page"))
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	if err := s.llama.StopWithTimeout(ctx); err != nil {

@@ -35,6 +35,9 @@
       <button class="nav-btn" data-page="models">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Models
       </button>
+      <button class="nav-btn" data-page="profiling">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Profiling
+      </button>
       <button class="nav-btn" data-page="settings">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>Settings
       </button>
@@ -158,24 +161,6 @@
         </details>
       </div>
 
-      <!-- expert usage (patches/0009) -->
-      <div class="card only-single" id="experts-card" hidden>
-        <div class="card-head">
-          <h2>Expert usage</h2>
-          <button id="experts-clear" class="btn btn-link">Clear this profile</button>
-        </div>
-        <p class="muted small">Record separate profiles for different work (e.g. coding, chat). Recording goes into the selected one, from the moment you select it. Hot experts (Settings) are loaded at start from their own choice of profile, which only changes when it is recorded into.</p>
-        <div class="row">
-          <label class="inline-field">Record into <select id="experts-profile"></select></label>
-          <label class="inline-field">Hot experts from <select id="experts-hot"></select></label>
-          <form id="experts-new-form" class="row">
-            <input id="experts-new" placeholder="new profile, e.g. coding" maxlength="40" aria-label="New profile name">
-            <button class="btn btn-secondary btn-sm">Add</button>
-          </form>
-        </div>
-        <div id="experts"></div>
-      </div>
-
       <!-- benchmark -->
       <details class="card disclosure-card" id="bench-card">
         <summary>
@@ -212,6 +197,59 @@
           <pre id="server-log" class="log" tabindex="0" aria-label="llama-server log"></pre>
         </div>
       </details>
+    </section>
+
+    <!-- ================= PROFILING ================= -->
+    <section id="page-profiling" class="page" aria-labelledby="h-profiling">
+      <header class="page-head"><h1 id="h-profiling">Profiling</h1></header>
+      <p class="page-lead">A mixture-of-experts model uses only a few of its experts per token, and some far more often than others. Record which ones your work uses, then keep the busiest ones in GPU memory. Everything here belongs to the model chosen below.</p>
+
+      <div class="card">
+        <div class="card-head"><h2>Model</h2></div>
+        <div class="form-grid">
+          <label class="field"><span class="field-label">Profiles of</span><select id="prof-model"></select></label>
+        </div>
+        <label class="check"><input type="checkbox" id="prof-record"><span><b>Record expert usage</b><small>Counts which experts each token is routed to, while you use the model. One-model mode only; slightly slower while on.</small></span></label>
+        <label class="check"><input type="checkbox" id="prof-hot"><span><b>Keep the most-used experts in GPU memory</b><small>Every expert stays in RAM, and the GPUs' spare memory holds the busiest ones from the profile chosen below, instead of whole layers. Needs 1,000 recorded tokens. One-model mode only; applies from the next start.</small></span></label>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Auto-profiling</h2></div>
+        <p class="muted small">Creates a profile per use case: the model is loaded with recording on and hot experts off (so the reading is unbiased), and each use case's typical prompts are sent to it. The model that was running is stopped for this and started again afterwards; the API is unavailable meanwhile.</p>
+        <div class="choice-grid" id="ap-cases"></div>
+        <div class="row ap-options">
+          <label class="inline-field">Length <select id="ap-tokens">
+            <option value="1000">Quick: 1,000 tokens each</option>
+            <option value="3000" selected>Standard: 3,000 tokens each</option>
+            <option value="8000">Thorough: 8,000 tokens each</option>
+          </select></label>
+          <label class="inline-field"><input type="checkbox" id="ap-replace" checked> Replace earlier data in these profiles</label>
+          <span id="ap-estimate" class="muted small"></span>
+        </div>
+        <div class="row">
+          <button id="ap-start" class="btn btn-primary">Start auto-profiling</button>
+          <button id="ap-cancel" class="btn btn-secondary" hidden>Cancel</button>
+          <span id="ap-phase" class="muted small" aria-live="polite"></span>
+        </div>
+        <div id="ap-steps" class="ap-steps"></div>
+      </div>
+
+      <div class="card" id="experts-card">
+        <div class="card-head">
+          <h2>Expert usage</h2>
+          <button id="experts-clear" class="btn btn-link">Clear this profile</button>
+        </div>
+        <p class="muted small">Recording goes into the selected profile from the moment you select it. Hot experts are loaded at start from their own choice of profile, which only changes when it is recorded into.</p>
+        <div class="row">
+          <label class="inline-field">Record into <select id="experts-profile"></select></label>
+          <label class="inline-field">Hot experts from <select id="experts-hot"></select></label>
+          <form id="experts-new-form" class="row">
+            <input id="experts-new" placeholder="new profile, e.g. work" maxlength="40" aria-label="New profile name">
+            <button class="btn btn-secondary btn-sm">Add</button>
+          </form>
+        </div>
+        <div id="experts"></div>
+      </div>
     </section>
 
     <!-- ================= MODELS ================= -->
@@ -358,8 +396,6 @@
                 <label class="field"><span class="field-label">GPU prompt offload from (tokens)</span><input name="model.offload_min_batch" type="number" min="1" placeholder="128"><small class="help">Prompts this long send RAM-resident weights to the GPU.</small></label>
               </div>
               <label class="check"><input type="checkbox" name="model.qsa_blocks"><span><b>Experimental: whole-block sparse attention</b><small>Qwen3.8 models only. Less GPU memory at long contexts; answers can differ slightly from the reference model.</small></span></label>
-              <label class="check"><input type="checkbox" name="model.expert_stats"><span><b>Record expert usage</b><small>Counts which experts each token is routed to, to see whether keeping the busiest ones in VRAM would help. Shown on the Run page. One-model mode only; slightly slower while on.</small></span></label>
-              <label class="check"><input type="checkbox" name="model.hot_experts"><span><b>Keep the most-used experts in GPU memory</b><small>Uses the recorded expert usage (the profile selected on the Run page, at least 1,000 tokens): every expert stays in RAM, and the GPUs' spare memory holds the busiest ones instead of whole layers. The plan shows how much traffic they cover. One-model mode only; applies from the next start.</small></span></label>
               <label class="field"><span class="field-label">Extra llama-server arguments</span>
                 <input name="model.extra_args" class="mono" placeholder="e.g. --load-mode mmap+mlock">
               </label>

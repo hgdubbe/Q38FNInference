@@ -49,6 +49,9 @@ type expertRun struct {
 // their experts in RAM (blocks 0..RAMLayers-1).
 type expertRunMeta struct {
 	RAMLayers int `json:"ram_layers"`
+	// Auto marks auto-profiling runs: they fill profiles but are never
+	// "the latest session" that profiles are matched against.
+	Auto bool `json:"auto,omitempty"`
 }
 
 // expertModelDir holds a model's profiles, one folder each, and the name of
@@ -110,7 +113,7 @@ func writeSegments(run string, segs []expertSegment) error {
 
 // expertStatsEnv starts a live run for a launch in the active profile and
 // returns the environment variable pointing llama-server at it, and its path.
-func expertStatsEnv(modelPath string, args []string) (string, string, error) {
+func expertStatsEnv(modelPath string, args []string, auto bool) (string, string, error) {
 	modelDir, err := expertModelDir(modelPath)
 	if err != nil {
 		return "", "", err
@@ -122,7 +125,7 @@ func expertStatsEnv(modelPath string, args []string) (string, string, error) {
 		return "", "", err
 	}
 	run := filepath.Join(dir, "run-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".json")
-	meta, _ := json.Marshal(expertRunMeta{RAMLayers: ramExpertLayers(modelPath, args)})
+	meta, _ := json.Marshal(expertRunMeta{RAMLayers: ramExpertLayers(modelPath, args), Auto: auto})
 	if err := os.WriteFile(strings.TrimSuffix(run, ".json")+".meta", meta, 0o644); err != nil {
 		return "", "", err
 	}
@@ -339,7 +342,7 @@ type expertCounts struct {
 	promptTokens  uint64
 	nExpert, runs int
 	ramLayers     int
-	newest        string // file name of the newest run
+	newest        string // file name of the newest run that isn't auto-profiling
 }
 
 func newExpertCounts() *expertCounts {
@@ -391,12 +394,12 @@ func loadExpertCounts(dir, skip string) *expertCounts {
 			continue
 		}
 		c.add(r)
-		c.newest = filepath.Base(f)
-		if mb, err := os.ReadFile(strings.TrimSuffix(f, ".json") + ".meta"); err == nil {
-			var m expertRunMeta
-			if json.Unmarshal(mb, &m) == nil {
-				c.ramLayers = m.RAMLayers // the latest run's placement
-			}
+		var m expertRunMeta
+		if mb, err := os.ReadFile(strings.TrimSuffix(f, ".json") + ".meta"); err == nil && json.Unmarshal(mb, &m) == nil {
+			c.ramLayers = m.RAMLayers // the latest run's placement
+		}
+		if !m.Auto {
+			c.newest = filepath.Base(f)
 		}
 	}
 	return c
@@ -515,6 +518,9 @@ type expertStatsResponse struct {
 	// the profile that choice means right now.
 	HotProfile  string `json:"hot_profile"`
 	HotResolved string `json:"hot_resolved"`
+	// the model's switches (expertModelSettings)
+	Record bool `json:"record"`
+	Hot    bool `json:"hot"`
 }
 
 // expertStats reports the active profile's summary, every profile, and how
@@ -535,7 +541,7 @@ func expertStats(modelDir, running string) (expertStatsResponse, error) {
 	// profile's newest finished run; it isn't compared with itself
 	var latest map[int][]uint64
 	skipFile, skipLive := "", false
-	if n := len(stretches); n > 0 && stretches[n-1].profile == active {
+	if n := len(stretches); n > 0 && stretches[n-1].profile == active && !liveMeta.Auto {
 		if r := stretches[n-1].counts; r.GenTokens+r.PromptTokens >= minMatchTokens {
 			one := newExpertCounts()
 			one.add(r)
@@ -656,6 +662,8 @@ func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 		Model      string  `json:"model"`
 		Profile    string  `json:"profile"`
 		HotProfile *string `json:"hot_profile"` // POST: set where hot experts come from ("" = auto)
+		Record     *bool   `json:"record"`      // POST: record this model's expert usage
+		Hot        *bool   `json:"hot"`         // POST: plan this model with hot experts
 	}
 	if r.Method == http.MethodPost {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -687,6 +695,20 @@ func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodPost:
+		if req.Record != nil || req.Hot != nil {
+			es := readExpertSettings(modelDir, s.Config().ModelFor(modelName(req.Model)))
+			if req.Record != nil {
+				es.Record = *req.Record
+			}
+			if req.Hot != nil {
+				es.Hot = *req.Hot
+			}
+			if err := writeExpertSettings(modelDir, es); err != nil {
+				writeErr(w, http.StatusInternalServerError, err)
+				return
+			}
+			break
+		}
 		if req.HotProfile != nil {
 			if *req.HotProfile != "" && !validProfileName(*req.HotProfile) {
 				writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown profile %q", *req.HotProfile))
@@ -739,6 +761,8 @@ func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.Live = running != ""
+	es := readExpertSettings(modelDir, s.Config().ModelFor(modelName(req.Model)))
+	resp.Record, resp.Hot = es.Record, es.Hot
 	resp.HotProfile = hotExpertProfile(modelDir)
 	resp.HotResolved = resp.HotProfile
 	if resp.HotResolved == "" {
@@ -856,4 +880,40 @@ func flagValue(args []string, flag string) string {
 		}
 	}
 	return ""
+}
+
+// expertModelSettings are a model's recording and hot-expert switches, kept
+// with its profiles (settings.json in its expert-stats folder).
+type expertModelSettings struct {
+	Record bool `json:"record"`
+	Hot    bool `json:"hot"`
+}
+
+// readExpertSettings falls back to the model settings' flags, where these
+// switches lived before, while the model has no settings.json.
+func readExpertSettings(modelDir string, ms appconfig.ModelSettings) expertModelSettings {
+	var es expertModelSettings
+	b, err := os.ReadFile(filepath.Join(modelDir, "settings.json"))
+	if err != nil || json.Unmarshal(b, &es) != nil {
+		return expertModelSettings{Record: ms.ExpertStats, Hot: ms.HotExperts}
+	}
+	return es
+}
+
+func writeExpertSettings(modelDir string, es expertModelSettings) error {
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		return err
+	}
+	b, _ := json.Marshal(es)
+	return os.WriteFile(filepath.Join(modelDir, "settings.json"), b, 0o644)
+}
+
+func (s *Server) recordExperts(modelPath string, ms appconfig.ModelSettings) bool {
+	dir, err := expertModelDir(modelPath)
+	return err == nil && readExpertSettings(dir, ms).Record
+}
+
+func (s *Server) hotExperts(modelPath string, ms appconfig.ModelSettings) bool {
+	dir, err := expertModelDir(modelPath)
+	return err == nil && readExpertSettings(dir, ms).Hot
 }

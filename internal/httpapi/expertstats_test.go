@@ -105,3 +105,28 @@ func TestLiveRunSplitsAtProfileSwitch(t *testing.T) {
 		t.Errorf("live files left: %v", left)
 	}
 }
+
+func TestAutoProfilingRunsAreNotTheLatestSession(t *testing.T) {
+	dir := t.TempDir()
+	write := func(profile, name, hits string, auto bool) {
+		p := filepath.Join(dir, profile)
+		os.MkdirAll(p, 0o755)
+		os.WriteFile(filepath.Join(p, name+".json"), []byte(`{"n_expert":4,"gen_tokens":1000,"prompt_tokens":0,"layers":[{"layer":0,"gen":`+hits+`,"prompt":[0,0,0,0]}]}`), 0o644)
+		if auto {
+			os.WriteFile(filepath.Join(p, name+".meta"), []byte(`{"auto":true}`), 0o644)
+		}
+	}
+	write("chat", "run-1", "[900,50,25,25]", false)
+	write("chat", "run-2", "[30,20,60,890]", false) // the user's latest session, coding-like
+	write("coding", "run-3", "[25,25,50,900]", true)
+	write("chat", "run-4", "[900,40,30,30]", true) // newer, but auto-profiling
+	os.WriteFile(filepath.Join(dir, "active"), []byte("chat"), 0o644)
+
+	r, err := expertStats(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Best != "coding" {
+		t.Errorf("best = %q, want coding (matched on run-2, not the auto-profiling run-4)", r.Best)
+	}
+}

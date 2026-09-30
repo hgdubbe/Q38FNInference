@@ -55,11 +55,13 @@ models go to `%APPDATA%\Q38FNInference\models`.
    performance options (folded away by default), API port, network access
    and key. Changes show a save bar until saved. "Settings for" switches
    between the defaults and one model's own settings (also reachable from
-   the Run page's "Its settings" link). Under performance options, "Record
-   expert usage" counts how evenly the model uses its MoE experts and shows
-   the result on the Run page (see docs/ARCHITECTURE.md). "Keep the
-   most-used experts in GPU memory" then fills the GPUs with the busiest
-   experts from a chosen profile instead of whole layers.
+   the Run page's "Its settings" link).
+5. **Profiling**: per model, "Record expert usage" counts how evenly the
+   model uses its MoE experts, per profile; "Keep the most-used experts in
+   GPU memory" then fills the GPUs with the busiest experts of a chosen
+   profile instead of whole layers. Auto-profiling records a profile for
+   each chosen use case (coding, roleplay, storytelling, ...) by prompting
+   the model itself (see docs/ARCHITECTURE.md).
 
 ## API
 

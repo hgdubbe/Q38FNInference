@@ -436,6 +436,30 @@ the latest session resembled most, else the recording profile if it has
 enough data, else the one with the most. Changing it needs a restart: the
 copies are made at load.
 
+## Profiling tab and auto-profiling
+
+Everything about expert usage lives on the Profiling tab and belongs to one
+model: its recording and hot-expert switches (`settings.json` in its
+expert-stats folder; before, these were model settings, which are still
+read while a model has no such file), its profiles, and the choices of
+recording and hot-expert profile.
+
+Auto-profiling (`autoprofile.go`) creates one profile per chosen use case
+(assistant, coding, agentic coding, roleplay, storytelling, writing,
+research, math, translation, summaries). It stops whatever runs, loads the
+model with recording on and hot experts off (`tuneWith(..., hot=false)`,
+and `launch` records while a run is active), and keeps the API proxy
+detached so outside requests can't mix in. For each use case it switches
+the live recording profile (waiting 1.5 s first so the previous counts are
+written out) and sends that use case's prompts, with its system prompt,
+straight to llama-server until the chosen number of generated tokens. Then
+it stops the model, which files each stretch into its profile, restores the
+recording profile and starts the model that was running before again (in
+one-model mode; on-demand mode is left stopped with a note). Its runs are
+marked `auto` in their `.meta` files: they fill profiles but are never "the
+latest session" that profiles are matched against, so auto's choice keeps
+following real use. Cancelling keeps what was recorded so far.
+
 ## Known limitations / open questions
 
 - Nothing here has been run against real Qwen3.8-Flash-Next weights or real

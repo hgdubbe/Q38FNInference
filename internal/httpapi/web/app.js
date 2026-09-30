@@ -562,6 +562,7 @@ async function loadLocalModels() {
   renderLocalModels();
   renderPicker();
   renderScope();
+  renderProfModels();
 }
 $('refresh-local').addEventListener('click', async () => { await loadLocalModels(); toast('Model folders rescanned.'); });
 
@@ -903,7 +904,6 @@ let tuneSeq = 0;
 async function computeTune() {
   const out = $('plan');
   if (!state.model) return;
-  loadExpertStats();
   const seq = ++tuneSeq;
   out.replaceChildren(el('div', 'skeleton'));
   try {
@@ -993,17 +993,29 @@ function renderPlan() {
 
 // How evenly the model spreads tokens over its experts, from the counts
 // llama-server records with "Record expert usage" on (patches/0009).
+// the model the Profiling page shows (its own choice, the Run page's by default)
+function profModel() {
+  return $('prof-model').value || (state.model && state.model.path) || '';
+}
+
+function renderProfModels() {
+  const sel = $('prof-model');
+  const cur = sel.value || (state.model && state.model.path) || '';
+  sel.replaceChildren(...state.localGroups.map((g) => new Option(g.Name, g.Files[0].Path)));
+  if (cur && state.localGroups.some((g) => g.Files[0].Path === cur)) sel.value = cur;
+  loadExpertStats();
+}
+$('prof-model').addEventListener('change', () => loadExpertStats());
+
 async function loadExpertStats() {
-  const card = $('experts-card');
-  if (!state.model || !state.cfg) { card.hidden = true; return; }
-  const path = state.model.path;
-  const id = modelId(path);
-  const ms = hasOverride(state.cfg, id) ? state.cfg.model_overrides[id] : (state.cfg.model || {});
+  const path = profModel();
+  if (!path || !state.cfg) return;
   let s;
   try { s = await api('GET', '/api/expert-stats?model=' + encodeURIComponent(path)); } catch (_) { return; }
-  if (!state.model || state.model.path !== path) return;
-  const anyRuns = (s.profiles || []).some((p) => p.runs > 0);
-  card.hidden = !anyRuns && !ms.expert_stats;
+  if (profModel() !== path) return;
+  const ms = { expert_stats: s.record, hot_experts: s.hot };
+  $('prof-record').checked = s.record;
+  $('prof-hot').checked = s.hot;
   $('experts-clear').hidden = !s.runs;
   const sel = $('experts-profile');
   if (document.activeElement !== sel) {
@@ -1058,21 +1070,21 @@ async function loadExpertStats() {
     stats, callout(verdict, 'info'), ...(suggest ? [suggest] : []));
 }
 async function setExpertProfile(name) {
-  if (!state.model) return;
+  if (!profModel()) return;
   try {
-    await api('POST', '/api/expert-stats', { model: state.model.path, profile: name });
+    await api('POST', '/api/expert-stats', { model: profModel(), profile: name });
   } catch (e) { toast(e.message, 'error'); }
   loadExpertStats();
 }
 $('experts-profile').addEventListener('change', (e) => setExpertProfile(e.target.value));
 $('experts-hot').addEventListener('change', async (e) => {
-  if (!state.model) return;
+  if (!profModel()) return;
   try {
-    await api('POST', '/api/expert-stats', { model: state.model.path, hot_profile: e.target.value });
+    await api('POST', '/api/expert-stats', { model: profModel(), hot_profile: e.target.value });
     toast(state.status && state.status.Running ? 'Hot experts are loaded at start: restart the model to use this profile.' : 'Used from the next start.', 'ok', 3500);
   } catch (err) { toast(err.message, 'error'); }
   loadExpertStats();
-  computeTune();
+  if (state.model && state.model.path === profModel()) computeTune();
 });
 $('experts-new-form').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -1082,11 +1094,95 @@ $('experts-new-form').addEventListener('submit', (e) => {
   setExpertProfile(name);
 });
 $('experts-clear').addEventListener('click', async () => {
-  if (!state.model || !(await confirmDialog('Clear this profile?', 'Deletes the counts recorded in this profile.', 'Clear', true))) return;
-  try { await api('DELETE', '/api/expert-stats?model=' + encodeURIComponent(state.model.path)); } catch (e) { toast(e.message, 'error'); }
+  if (!profModel() || !(await confirmDialog('Clear this profile?', 'Deletes the counts recorded in this profile.', 'Clear', true))) return;
+  try { await api('DELETE', '/api/expert-stats?model=' + encodeURIComponent(profModel())); } catch (e) { toast(e.message, 'error'); }
   loadExpertStats();
 });
-setInterval(() => { if (state.status && state.status.Running) loadExpertStats(); }, 10000);
+setInterval(() => { if (state.status && state.status.Running && $('page-profiling').classList.contains('active')) loadExpertStats(); }, 10000);
+
+for (const [box, key] of [['prof-record', 'record'], ['prof-hot', 'hot']]) {
+  $(box).addEventListener('change', async (e) => {
+    if (!profModel()) return;
+    try {
+      await api('POST', '/api/expert-stats', { model: profModel(), [key]: e.target.checked });
+      if (state.status && state.status.Running) toast('Applies from the next start of the model.', 'ok', 3000);
+    } catch (err) { toast(err.message, 'error'); e.target.checked = !e.target.checked; }
+    loadExpertStats();
+    if (state.model && state.model.path === profModel()) computeTune();
+  });
+}
+
+// ---- profiling: auto-profiling ------------------------------------------------
+
+let apPoll = null;
+async function loadAutoProfile() {
+  let s;
+  try { s = await api('GET', '/api/autoprofile'); } catch (_) { return; }
+  const grid = $('ap-cases');
+  if (!grid.children.length) {
+    for (const u of s.use_cases) {
+      const l = el('label', 'choice');
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.value = u.id;
+      cb.checked = ['assistant', 'coding'].includes(u.id);
+      const t = el('span');
+      t.append(el('b', '', u.name), el('small', '', u.desc));
+      l.append(cb, t);
+      grid.appendChild(l);
+    }
+    grid.addEventListener('change', apEstimate);
+  }
+  apEstimate();
+  $('ap-start').hidden = s.running;
+  $('ap-cancel').hidden = !s.running;
+  grid.querySelectorAll('input').forEach((i) => { i.disabled = s.running; });
+  const name = (p) => (state.localGroups.find((g) => g.Files[0].Path === p) || {}).Name || p;
+  $('ap-phase').textContent = s.running ? `${name(s.model)}: ${s.phase}…`
+    : s.error ? `Stopped: ${s.error}` : s.steps ? 'Finished.' : '';
+  const box = $('ap-steps');
+  box.replaceChildren(...(s.steps || []).map((st) => {
+    const row = el('div', 'ap-step ap-' + st.state);
+    const pct = Math.min(100, Math.round(100 * st.tokens / st.target));
+    const bar = el('div', 'meter');
+    const fill = el('span', 'm-model');
+    fill.style.width = pct + '%';
+    bar.appendChild(fill);
+    row.append(el('b', '', st.name), bar, el('span', 'muted small', `${st.tokens.toLocaleString()} / ${st.target.toLocaleString()} tokens · ${st.state}`));
+    return row;
+  }));
+  if (s.note) box.appendChild(callout(s.note, 'warn'));
+  if (s.running && !apPoll) apPoll = setInterval(loadAutoProfile, 1500);
+  if (s.running) loadExpertStats();
+  if (!s.running && apPoll) {
+    clearInterval(apPoll);
+    apPoll = null;
+    loadExpertStats();
+    refreshServerStatus();
+  }
+}
+function apSelected() {
+  return [...$('ap-cases').querySelectorAll('input:checked')].map((i) => i.value);
+}
+function apEstimate() {
+  const n = apSelected().length * Number($('ap-tokens').value);
+  // generation speed isn't known before the run; 10 tokens/s is typical with experts in RAM
+  $('ap-estimate').textContent = n ? `${n.toLocaleString()} tokens in total, about ${Math.max(1, Math.round(n / 10 / 60))} min at 10 tokens/s` : '';
+}
+$('ap-tokens').addEventListener('change', apEstimate);
+$('ap-start').addEventListener('click', async () => {
+  const cases = apSelected();
+  if (!profModel()) { toast('Choose a model first.'); return; }
+  if (!cases.length) { toast('Choose at least one use case.'); return; }
+  if (state.status && state.status.Running && !(await confirmDialog('Stop the running model?', 'Auto-profiling loads the model on its own and starts the running model again when it is done.', 'Start profiling'))) return;
+  try {
+    await api('POST', '/api/autoprofile', { model: profModel(), use_cases: cases, tokens: Number($('ap-tokens').value), replace: $('ap-replace').checked });
+  } catch (e) { toast(e.message, 'error'); return; }
+  loadAutoProfile();
+});
+$('ap-cancel').addEventListener('click', async () => {
+  try { await api('DELETE', '/api/autoprofile'); } catch (e) { toast(e.message, 'error'); }
+});
 
 // ---- run: start / stop / status ---------------------------------------------
 
@@ -1405,4 +1501,5 @@ window.addEventListener('resize', () => {
   refreshDownloads();
   refreshServerStatus();
   streamLogs();
+  loadAutoProfile();
 })();

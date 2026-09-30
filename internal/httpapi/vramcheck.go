@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"regexp"
 	"strconv"
 	"time"
@@ -54,6 +55,7 @@ type launchInfo struct {
 	devices   []tuning.GPU // in CUDA ordinal order, FreeBytes as seen at start
 	auto      bool         // args were the plan's own, so a re-plan can replace them
 	recheck   bool         // this start already is the corrected re-plan
+	target    *url.URL     // llama-server's address (under Server.mu)
 }
 
 // vramOverflow reports, per GPU index, how far a load went past the memory
