@@ -1,0 +1,53 @@
+# Verified with git apply --check against ggml-org/llama.cpp 6c7a87f7e5e5cd75b8a641c3471f2dee84a6ed17.
+# Windows: use only performance cores (highest EfficiencyClass) for math
+# threads on hybrid Intel CPUs, as llama.cpp already does on Linux.
+diff --git a/common/common.cpp b/common/common.cpp
+index 6099f2e..76c3442 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -222,6 +222,45 @@ int32_t common_cpu_get_num_math() {
+         smt_factor = logical_cpus / phy_cpus;
+     }
+     return phy_cpus * std::min(smt_factor, 2);
++#elif defined(_WIN32) && (_WIN32_WINNT >= 0x0601) && !defined(__MINGW64__)
++    // Hybrid CPUs (Intel P/E cores): like the Linux path above, use only the
++    // performance cores for math threads, since every graph step waits for
++    // the slowest thread. Windows reports a higher EfficiencyClass for faster
++    // cores; on non-hybrid CPUs it is 0 everywhere and nothing changes.
++    {
++        DWORD size = 0;
++        GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &size);
++        if (size > 0) {
++            std::vector<char> buf(size);
++            if (GetLogicalProcessorInformationEx(RelationProcessorCore,
++                    reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data()), &size)) {
++                int max_class = -1;
++                int n_max     = 0;
++                int n_all     = 0;
++                for (DWORD off = 0; off < size; ) {
++                    auto * info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data() + off);
++                    if (info->Size == 0) {
++                        break;
++                    }
++                    if (info->Relationship == RelationProcessorCore) {
++                        const int c = info->Processor.EfficiencyClass;
++                        n_all++;
++                        if (c > max_class) {
++                            max_class = c;
++                            n_max     = 0;
++                        }
++                        if (c == max_class) {
++                            n_max++;
++                        }
++                    }
++                    off += info->Size;
++                }
++                if (n_max > 0 && n_max < n_all) {
++                    return n_max;
++                }
++            }
++        }
++    }
+ #endif
+     return common_cpu_get_num_physical_cores();
+ }

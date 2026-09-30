@@ -1,0 +1,44 @@
+# Verified with `git apply --check` against ggml-org/llama.cpp commit
+# 6c7a87f7e5e5cd75b8a641c3471f2dee84a6ed17 (2026-09-28). Purely additive
+# logging in llama_model::print_info() for LLM_ARCH_QWEN4EXP -- no behavior
+# change. See docs/ARCHITECTURE.md for why this is the only source patch in
+# this project, rather than hand-tuning CUDA kernels.
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index ab5e744..bdd76f4 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -2225,6 +2225,34 @@ void llama_model::print_info() const {
+             LLAMA_LOG_INFO("%s: n_layer_nextn         = %d\n",     __func__, hparams.n_layer_nextn);
+         }
+ 
++        if (arch == LLM_ARCH_QWEN4EXP) {
++            uint32_t n_recr = 0;
++            uint32_t n_ple  = 0;
++            for (uint32_t il = 0; il < hparams.n_layer_all; il++) {
++                if (hparams.is_recr(il)) {
++                    n_recr++;
++                }
++                if (hparams.is_ple(il)) {
++                    n_ple++;
++                }
++            }
++            // Qwen3.8-Flash-Next mixes gated-delta-net (GDN, "recurrent") layers with
++            // full-attention QSA (indexer-gated sparse attention) layers; most of the
++            // model's memory and compute lives in the MoE experts, so a launcher sizing
++            // GPU/CPU offload for this arch needs these counts up front, not derived by
++            // re-parsing every layer_types entry from the GGUF metadata itself.
++            LLAMA_LOG_INFO("%s: n_ff_exp              = %d\n",     __func__, hparams.n_ff_exp());
++            LLAMA_LOG_INFO("%s: n_ff_shexp            = %d\n",     __func__, hparams.n_ff_shexp);
++            LLAMA_LOG_INFO("%s: n_layer_recurrent(gdn) = %u / %u\n", __func__, n_recr, hparams.n_layer_all);
++            LLAMA_LOG_INFO("%s: n_layer_full_attn(qsa) = %u / %u\n", __func__, hparams.n_layer_all - n_recr, hparams.n_layer_all);
++            LLAMA_LOG_INFO("%s: hyper_connection_count = %u\n",    __func__, hparams.dsv4_hc_mult);
++            LLAMA_LOG_INFO("%s: hyper_connection_lowrank= %u\n",   __func__, hparams.hc_low_rank);
++            LLAMA_LOG_INFO("%s: indexer_n_head          = %u\n",   __func__, hparams.indexer_n_head);
++            LLAMA_LOG_INFO("%s: indexer_head_size       = %u\n",   __func__, hparams.indexer_head_size);
++            LLAMA_LOG_INFO("%s: indexer_top_k           = %u\n",   __func__, hparams.indexer_top_k);
++            LLAMA_LOG_INFO("%s: ple_layers              = %u%s\n", __func__, n_ple, n_ple > 0 ? " (n-gram hash embedding active)" : "");
++        }
++
+         if (arch == LLM_ARCH_SMALLTHINKER || arch == LLM_ARCH_LFM2MOE) {
+             LLAMA_LOG_INFO("%s: n_ff_exp              = %d\n",     __func__, hparams.n_ff_exp());
+             LLAMA_LOG_INFO("%s: expert_gating_func    = %s\n",     __func__, llama_expert_gating_func_name((llama_expert_gating_func_type) hparams.expert_gating_func));

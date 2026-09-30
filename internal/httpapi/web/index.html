@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<link rel="preload" href="fonts/space-grotesk-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<title>Q38FNInference</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%274%27 fill=%27%236e8bff%27/%3E%3Cpath d=%27M4 8h8M8 4v8%27 stroke=%27white%27 stroke-width=%272%27 stroke-linecap=%27round%27/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="mode-single">
+<a class="skip" href="#main">Skip to content</a>
+
+<svg class="noise" aria-hidden="true" focusable="false"><title>Paper grain texture</title>
+  <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="4" stitchTiles="stitch"/></filter>
+  <rect width="100%" height="100%" filter="url(#grain)"/>
+</svg>
+
+<div class="shell">
+  <!-- navigation + always-visible status (visibility of system status) -->
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <div class="brand-name">Q38<span>FN</span><br>Inference</div>
+        <div class="brand-sub">Local LLM server</div>
+      </div>
+    </div>
+
+    <nav class="nav" aria-label="Sections">
+      <button class="nav-btn active" data-page="home" aria-current="page">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4l13 8-13 8V4z"/></svg>Run
+      </button>
+      <button class="nav-btn" data-page="models">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Models
+      </button>
+      <button class="nav-btn" data-page="profiling">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Profiling
+      </button>
+      <button class="nav-btn" data-page="guide">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5v.01"/></svg>Guide
+      </button>
+      <button class="nav-btn" data-page="settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>Settings
+      </button>
+    </nav>
+
+    <div class="side-status" aria-live="polite">
+      <div class="side-status-row"><span id="side-dot" class="dot"></span><span id="side-state">Stopped</span></div>
+      <div id="side-model" class="side-model">No model running</div>
+      <button id="side-chat" class="btn btn-secondary btn-sm" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4V5z"/></svg>Open chat
+      </button>
+    </div>
+
+    <button id="quit" class="btn btn-ghost btn-sm quit" title="Stop the model and exit the launcher">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>Quit
+    </button>
+  </aside>
+
+  <main id="main" tabindex="-1">
+    <!-- ================= RUN ================= -->
+    <section id="page-home" class="page active" aria-labelledby="h-home">
+      <header class="page-head">
+        <h1 id="h-home">Run</h1>
+        <div class="seg" role="radiogroup" aria-label="Serving mode">
+          <button role="radio" class="seg-btn" data-mode="single" aria-checked="true">One model</button>
+          <button role="radio" class="seg-btn" data-mode="ondemand" aria-checked="false">All models, on demand</button>
+        </div>
+      </header>
+      <div class="marquee marquee-fast" id="status-marquee" aria-hidden="true"></div>
+      <p class="page-lead only-single">Pick a model and start it. The launcher works out how to split it across your GPUs and RAM.</p>
+      <p class="page-lead only-ondemand">Every local model is offered through the API; the one a request names is loaded automatically, one at a time.</p>
+
+      <!-- hero: state + primary action -->
+      <div class="card hero" id="hero">
+        <div class="hero-main">
+          <div class="hero-state">
+            <span id="hero-dot" class="dot dot-lg"></span>
+            <div>
+              <div id="hero-title" class="hero-title">Ready to start</div>
+              <div id="hero-detail" class="hero-detail">Choose a model below.</div>
+            </div>
+          </div>
+          <div class="hero-actions">
+            <button id="start-server" class="btn btn-primary btn-lg">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4l13 8-13 8V4z"/></svg><span>Start</span>
+            </button>
+            <button id="stop-server" class="btn btn-danger btn-lg" hidden>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg><span>Stop</span>
+            </button>
+            <button id="open-webui" class="btn btn-secondary btn-lg" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4V5z"/></svg><span>Open chat</span>
+            </button>
+          </div>
+        </div>
+        <div id="hero-progress" class="progress indeterminate" hidden><div></div></div>
+        <div class="api-row">
+          <span class="api-label">API</span>
+          <code id="api-url">…</code>
+          <button id="copy-api" class="btn btn-ghost btn-xs" title="Copy the API address">Copy</button>
+          <span class="api-hint">OpenAI- and Anthropic-compatible: point any client here</span>
+        </div>
+        <div id="api-error" class="callout callout-error" hidden></div>
+      </div>
+
+      <!-- single: model choice -->
+      <div class="card only-single">
+        <div class="card-head">
+          <h2>Model</h2>
+          <div class="card-tools">
+            <button class="btn btn-link" id="model-settings-link">Its settings</button>
+            <button class="btn btn-link" data-goto="models">Browse &amp; download</button>
+          </div>
+        </div>
+        <div id="model-picker" class="dropdown"></div>
+      </div>
+
+      <!-- on-demand: models + status -->
+      <div class="card only-ondemand">
+        <div class="card-head">
+          <h2>Models</h2>
+          <div class="card-tools">
+            <label class="inline-field">Unload when idle for
+              <input id="idle-unload" type="number" min="0" class="input-xs" aria-describedby="idle-hint"> min
+            </label>
+            <button id="router-rescan" class="btn btn-secondary btn-sm">Rescan</button>
+          </div>
+        </div>
+        <p id="idle-hint" class="muted small">0 keeps a model loaded until another one is requested. New downloads show up within 30 seconds.</p>
+        <div id="router-models" class="list"></div>
+        <div id="router-notes" class="callout" hidden></div>
+        <details class="disclosure">
+          <summary>How API clients choose a model</summary>
+          <div class="disclosure-body small">
+            <p>Send the model's name in the <code>model</code> field of any request. List models with <code>GET /v1/models</code>; load or unload ahead of time with <code>POST /models/load</code> or <code>POST /models/unload</code> and <code>{"model": "…"}</code>.</p>
+          </div>
+        </details>
+      </div>
+
+      <!-- hardware -->
+      <div class="card">
+        <div class="card-head">
+          <h2>Hardware</h2>
+          <span id="hw-summary" class="muted small"></span>
+        </div>
+        <div id="gpu-list" class="gpu-grid"><div class="skeleton"></div></div>
+      </div>
+
+      <!-- plan (single) -->
+      <div class="card only-single" id="plan-card">
+        <div class="card-head">
+          <h2>How the model will be loaded</h2>
+          <button id="retune" class="btn btn-link">Recalculate</button>
+        </div>
+        <div id="plan" class="plan"><p class="muted">Choose a model to see where it will run.</p></div>
+        <details class="disclosure" id="args-disclosure">
+          <summary>Advanced: llama-server command line</summary>
+          <div class="disclosure-body">
+            <p class="muted small">Generated from the plan and your settings. Edits are used for the next start only; Recalculate resets them.</p>
+            <textarea id="tune-args" rows="4" spellcheck="false" class="mono" aria-label="llama-server arguments"></textarea>
+          </div>
+        </details>
+      </div>
+
+      <!-- benchmark -->
+      <details class="card disclosure-card" id="bench-card">
+        <summary>
+          <span class="card-title">Speed test</span>
+          <span class="muted small">measure the running model's prompt and generation speed</span>
+        </summary>
+        <div class="disclosure-body">
+          <p class="muted small">Sends a fixed ~1500-token prompt, generates exactly 128 tokens and reports llama-server's own timings. Change a setting, restart and run it again to compare.</p>
+          <div class="row">
+            <label class="inline-field only-ondemand">Model <select id="bench-model"></select></label>
+            <button id="bench-run" class="btn btn-secondary" disabled>Run speed test</button>
+            <span id="bench-status" class="muted small" aria-live="polite"></span>
+          </div>
+          <div class="table-wrap" id="bench-wrap" hidden>
+            <table class="table">
+              <thead><tr><th>Time</th><th>Model</th><th class="num">Prompt</th><th class="num">Generation</th><th>Settings</th></tr></thead>
+              <tbody id="bench-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+
+      <!-- log -->
+      <details class="card disclosure-card" id="log-card">
+        <summary>
+          <span class="card-title">Server log</span>
+          <span id="log-last" class="muted small log-last"></span>
+        </summary>
+        <div class="disclosure-body">
+          <div class="row row-end">
+            <label class="inline-field"><input type="checkbox" id="log-details"> All details</label>
+            <button id="log-copy" class="btn btn-ghost btn-xs" title="Copies the full log, with all details">Copy</button>
+            <button id="log-clear" class="btn btn-ghost btn-xs">Clear</button>
+          </div>
+          <pre id="server-log" class="log" tabindex="0" aria-label="llama-server log"></pre>
+        </div>
+      </details>
+    </section>
+
+    <!-- ================= PROFILING ================= -->
+    <section id="page-profiling" class="page" aria-labelledby="h-profiling">
+      <header class="page-head"><h1 id="h-profiling">Profiling</h1><button class="btn btn-link" data-goto="guide">How this works</button></header>
+      <p class="page-lead">Make a model that doesn't fit in GPU memory faster: record which of its experts your work uses, and keep the busiest ones on the GPU.</p>
+
+      <div class="card">
+        <div class="card-head"><h2>Speed up</h2></div>
+        <div class="form-grid">
+          <label class="field"><span class="field-label">Model</span><select id="prof-model"></select></label>
+          <label class="field"><span class="field-label">Hot experts</span><select id="prof-hot-sel"></select>
+            <small class="help">Which profile decides the experts kept on the GPU. Applied when the model starts.</small></label>
+        </div>
+        <div class="row prof-status">
+          <p id="prof-hot-status" class="prof-status-text"></p>
+          <button id="prof-restart" class="btn btn-primary btn-sm" hidden>Restart the model now</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Create profiles automatically</h2></div>
+        <p class="muted small">Tick what you use the model for. The app loads the model on its own (hot experts off, so the result is unbiased), sends it typical prompts for each use case and saves one profile per use case. A running model is stopped meanwhile and started again afterwards.</p>
+        <div class="choice-grid" id="ap-cases"></div>
+        <div class="row ap-options">
+          <label class="inline-field">Length <select id="ap-tokens">
+            <option value="1000">Quick: 1,000 tokens each</option>
+            <option value="3000" selected>Standard: 3,000 tokens each</option>
+            <option value="8000">Thorough: 8,000 tokens each</option>
+          </select></label>
+          <label class="inline-field"><input type="checkbox" id="ap-replace" checked> Replace earlier data in these profiles</label>
+          <span id="ap-estimate" class="muted small"></span>
+        </div>
+        <div class="row">
+          <button id="ap-start" class="btn btn-primary">Start auto-profiling</button>
+          <button id="ap-cancel" class="btn btn-secondary" hidden>Cancel</button>
+          <span id="ap-phase" class="muted small" aria-live="polite"></span>
+        </div>
+        <div id="ap-steps" class="ap-steps"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Learn from your own use</h2></div>
+        <p class="muted small">Optional. While the model runs, count which experts your own requests use. "Auto" above then picks the profile your last session looked most like. Costs a little speed while on.</p>
+        <div class="form-grid">
+          <label class="field"><span class="field-label">Record</span><select id="prof-rec-sel"></select></label>
+        </div>
+        <form id="prof-rec-new-form" class="row" hidden>
+          <input id="prof-rec-new" placeholder="name, e.g. work" maxlength="40" aria-label="New profile name">
+          <button class="btn btn-secondary btn-sm">Create and record into it</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Profiles</h2></div>
+        <p class="muted small">How much of the expert work each profile's busiest quarter of experts does. Far above 25% means hot experts help a lot; around 25% means the work is spread evenly and they help little.</p>
+        <div id="prof-list" class="prof-list"></div>
+      </div>
+    </section>
+
+    <!-- ================= GUIDE ================= -->
+    <section id="page-guide" class="page" aria-labelledby="h-guide">
+      <header class="page-head"><h1 id="h-guide">Guide</h1></header>
+      <p class="page-lead">What each part of the app does, and how to get the most speed out of a model that doesn't fit in GPU memory.</p>
+
+      <div class="card guide">
+        <div class="card-head"><h2>Getting started</h2></div>
+        <ol>
+          <li><b>Models</b>: download a GGUF model from Hugging Face, or add a folder that has some.</li>
+          <li><b>Run</b>: pick the model and press Start. The app works out which parts go on your GPUs and which stay in RAM, and shows it under "How the model will be loaded".</li>
+          <li>Chat in the built-in window (Open chat), or point any OpenAI- or Anthropic-compatible app at the API address shown on the Run page.</li>
+          <li><b>Settings</b>: system prompt, thinking level, sampling, context length. "Settings for" lets one model have its own values.</li>
+        </ol>
+      </div>
+
+      <div class="card guide">
+        <div class="card-head"><h2>Why speed depends on the experts</h2></div>
+        <p>Models like Qwen3.8-Flash-Next are <b>mixture-of-experts</b> models: each layer has many small "experts", and each word the model writes only uses a few of them. Most of the model's size is experts.</p>
+        <p>When the model is larger than your GPU memory, some experts stay in RAM and the CPU has to read them for every word. That reading is the slowest part, so the fewer experts the CPU has to touch, the faster the model writes.</p>
+        <p>Normally the app puts <b>whole layers</b> of experts on the GPU. But experts are not used equally: often a small share of them does most of the work. Knowing which ones lets the GPU hold <b>the busiest experts of every layer</b> instead, and that is what profiling is for.</p>
+      </div>
+
+      <div class="card guide">
+        <div class="card-head"><h2>Profiles</h2></div>
+        <p>A <b>profile</b> is a record of how often each expert was used. Different work uses different experts (coding uses others than storytelling), so you can keep several profiles per model. Profiles belong to one model.</p>
+        <p>There are two ways to fill a profile:</p>
+        <ul>
+          <li><b>Create profiles automatically</b> (Profiling tab): tick the use cases you care about and press Start. The app sends typical prompts for each one to the model and saves each use case as its own profile ("coding", "roleplay", ...). It takes a few minutes per use case; your running model is stopped meanwhile and started again afterwards.</li>
+          <li><b>Learn from your own use</b> (Profiling tab): set "Record" to a profile, and what you do with the model is counted into it, from the moment you choose it.</li>
+        </ul>
+        <p>A profile only changes when something records into it. Profiles made automatically stay as they are as long as "Record" is Off or points to another profile (for example "default").</p>
+        <p>The Profiles list shows how useful each one is: how much of the work its busiest quarter of experts does. Far above 25% means hot experts help a lot.</p>
+      </div>
+
+      <div class="card guide">
+        <div class="card-head"><h2>Hot experts</h2></div>
+        <p>"<b>Hot experts</b>" under Speed up (Profiling tab) chooses a profile that decides which experts go on the GPU. All experts still stay in RAM too, so nothing is ever missing: the GPU just handles the busy ones, and the CPU only the rare ones. Answers are the same as without it.</p>
+        <ul>
+          <li><b>Off</b>: the GPUs hold whole layers of experts, as usual.</li>
+          <li><b>A named profile</b>, e.g. "coding": use it when you know what you are about to do. It is used from the first word on.</li>
+          <li><b>Auto</b>: not a profile of its own, but a rule. It picks the profile your last session looked most like (for that, "Learn from your own use" has to be on). Without a last session to compare, it uses the profile being recorded into if that has enough data, otherwise the profile with the most data. The menu shows which profile Auto means right now.</li>
+        </ul>
+        <p>The experts are copied to the GPU when the model loads, so a change needs a <b>restart of the model</b>: if it is running, a "Restart the model now" button appears. A profile needs at least 1,000 recorded tokens; with less, the model loads as usual and the page says so.</p>
+        <p>The plan on the Run page shows what you gain: the share of expert work the hot experts cover, next to what whole layers would have covered.</p>
+      </div>
+
+      <div class="card guide">
+        <div class="card-head"><h2>Recommended setup</h2></div>
+        <ol>
+          <li>Profiling tab: choose your model and <b>create profiles automatically</b> for the use cases you need ("Standard" length is enough).</li>
+          <li>Under Speed up, set "<b>Hot experts</b>" to the use case you are about to work on, or to Auto.</li>
+          <li>Optional: under "Learn from your own use", set Record to "default", so Auto can follow what you actually do. Recording costs a little speed; set it to Off when you don't need it.</li>
+          <li>Start (or restart) the model, and check the speed with the Speed test on the Run page.</li>
+        </ol>
+      </div>
+
+      <div class="card guide">
+        <div class="card-head"><h2>Good to know</h2></div>
+        <ul>
+          <li><b>One-model mode only.</b> Recording and hot experts don't work in "All models, on demand" mode.</li>
+          <li><b>Does it change the answers?</b> No. Only where the experts are computed changes.</li>
+          <li><b>Does recording with hot experts on spoil the profile?</b> No. The model picks the same experts wherever they are stored, so the record stays true.</li>
+          <li><b>Model fits completely on the GPU?</b> Then there is nothing to gain and the plan stays as it is.</li>
+          <li><b>Something wrong after turning hot experts on?</b> Set Hot experts to Off and restart the model: everything is back to the normal plan.</li>
+          <li><b>GPU memory:</b> after each load the app checks how much GPU memory is still free. If a lot is left unused, it remembers that for this model and restarts once with more of the model on the GPU; if a load ever overflows, it corrects the other way. The plan on the Run page lists what it learned.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ================= MODELS ================= -->
+    <section id="page-models" class="page" aria-labelledby="h-models">
+      <header class="page-head">
+        <h1 id="h-models">Models</h1>
+        <button id="refresh-local" class="btn btn-secondary btn-sm">Rescan folders</button>
+      </header>
+      <div class="marquee marquee-slow" id="models-marquee" aria-hidden="true"></div>
+
+      <div class="card">
+        <div class="card-head"><h2>On this PC</h2><span id="local-count" class="muted small"></span></div>
+        <div id="local-models" class="list"><div class="skeleton"></div></div>
+        <p class="muted small">Found in the Hugging Face cache, this app's models folder and the extra folders in Settings.</p>
+      </div>
+
+      <div class="card" id="downloads-card" hidden>
+        <div class="card-head"><h2>Downloads</h2></div>
+        <div id="downloads" class="list"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Get models from Hugging Face</h2></div>
+        <form id="hf-form" class="search" role="search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+          <input id="hf-query" type="search" placeholder="Search GGUF models, e.g. Qwen3.8-Flash-Next" aria-label="Search Hugging Face">
+          <button class="btn btn-primary btn-sm" type="submit">Search</button>
+        </form>
+        <form id="hf-repo-form" class="inline-form muted small">
+          <span>Or open a repository:</span>
+          <input id="hf-repo" placeholder="org/repo" value="Qwen/Qwen3.8-Flash-Next" aria-label="Repository">
+          <button class="btn btn-secondary btn-sm" type="submit">Show files</button>
+        </form>
+        <div id="hf-results" class="list"></div>
+        <div id="hf-files-wrap" hidden>
+          <div class="card-head sub-head">
+            <h3 id="hf-files-title">Files</h3>
+            <span class="legend small"><span class="badge badge-ok">fits in GPU</span><span class="badge badge-warn">GPU + RAM</span><span class="badge badge-bad">too large</span></span>
+          </div>
+          <div id="hf-files" class="list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= SETTINGS ================= -->
+    <section id="page-settings" class="page" aria-labelledby="h-settings">
+      <header class="page-head"><h1 id="h-settings">Settings</h1></header>
+
+      <form id="settings-form" autocomplete="off" novalidate>
+        <div class="card">
+          <div class="card-head"><h2>Settings for</h2></div>
+          <div class="form-grid">
+            <label class="field"><span class="field-label">Model</span>
+              <select id="settings-scope"><option value="">All models (defaults)</option></select>
+            </label>
+          </div>
+          <label class="check" id="scope-custom-row" hidden><input type="checkbox" id="scope-custom"><span><b>Give this model its own settings</b><small>Starts from a copy of the defaults. Otherwise it follows them.</small></span></label>
+          <p class="muted small" id="scope-note"></p>
+        </div>
+
+        <div class="card global-only">
+          <div class="card-head"><h2>System prompt</h2></div>
+          <p class="muted small">Added by the launcher to every chat request: the chat window, other apps and agents using the API.</p>
+          <div class="field">
+            <span class="field-label" id="spm-label">When to use it</span>
+            <div class="choice-grid" role="radiogroup" aria-labelledby="spm-label">
+              <label class="choice"><input type="radio" name="system_prompt_mode" value="off"><span><b>Off</b><small>Requests are sent unchanged.</small></span></label>
+              <label class="choice"><input type="radio" name="system_prompt_mode" value="default"><span><b>As a default</b><small>Only when a request brings none.</small></span></label>
+              <label class="choice"><input type="radio" name="system_prompt_mode" value="override"><span><b>Always replace</b><small>Replaces the request's own.</small></span></label>
+              <label class="choice"><input type="radio" name="system_prompt_mode" value="combine"><span><b>Put in front</b><small>Keeps the request's too. Best for coding agents.</small></span></label>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label">Start from a preset</span>
+            <div class="chips" id="prompt-presets">
+              <button type="button" class="chip" data-preset="assistant">Helpful</button>
+              <button type="button" class="chip" data-preset="concise">Concise</button>
+              <button type="button" class="chip" data-preset="direct">Direct</button>
+              <button type="button" class="chip" data-preset="coding">Coding</button>
+              <button type="button" class="chip" data-preset="agentic">Agentic coding</button>
+              <button type="button" class="chip" data-preset="research">Research</button>
+            </div>
+          </div>
+          <label class="field"><span class="field-label">Prompt</span>
+            <textarea name="system_prompt" rows="6" placeholder="e.g. You are a helpful assistant."></textarea>
+          </label>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Answers</h2></div>
+          <div class="form-grid">
+            <label class="field"><span class="field-label">Thinking</span>
+              <select name="model.reasoning">
+                <option value="off">Off: answer right away</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high" selected>High: think as long as needed</option>
+              </select>
+              <small class="help">Mapped onto whatever the model's chat template supports.</small>
+            </label>
+            <label class="field"><span class="field-label">Creativity (temperature)</span>
+              <input name="model.temperature" type="number" step="0.05" min="0" max="2" placeholder="model default">
+              <small class="help">Lower is more focused, higher more varied.</small>
+            </label>
+            <label class="field"><span class="field-label">Max answer length (tokens)</span>
+              <input name="model.max_tokens" type="number" min="1" placeholder="unlimited">
+            </label>
+            <label class="field"><span class="field-label">Context length (tokens)</span>
+              <input name="model.ctx_size" type="number" min="0" step="1024" placeholder="auto, up to 65536">
+              <small class="help">How much text the model sees at once. More uses more memory.</small>
+            </label>
+          </div>
+          <details class="disclosure">
+            <summary>More sampling options</summary>
+            <div class="disclosure-body form-grid">
+              <label class="field"><span class="field-label">Top-p</span><input name="model.top_p" type="number" step="0.01" min="0" max="1" placeholder="0.95"></label>
+              <label class="field"><span class="field-label">Top-k</span><input name="model.top_k" type="number" min="0" placeholder="40"></label>
+              <label class="field"><span class="field-label">Min-p</span><input name="model.min_p" type="number" step="0.01" min="0" max="1" placeholder="0.05"></label>
+              <label class="field"><span class="field-label">Repeat penalty</span><input name="model.repeat_penalty" type="number" step="0.01" min="0" placeholder="1.0"></label>
+              <label class="field"><span class="field-label">Presence penalty</span><input name="model.presence_penalty" type="number" step="0.1" placeholder="0.0"></label>
+              <label class="field"><span class="field-label">Seed</span><input name="model.seed" type="number" placeholder="random"></label>
+            </div>
+          </details>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Performance &amp; memory</h2></div>
+          <p class="muted small">The defaults are planned for your hardware; change these only to tune. Changes apply on the next start.</p>
+          <details class="disclosure">
+            <summary>Show performance options</summary>
+            <div class="disclosure-body">
+              <div class="form-grid">
+                <label class="field"><span class="field-label">KV cache precision</span>
+                  <select name="model.cache_type">
+                    <option value="">q8_0 (default)</option>
+                    <option value="f16">f16 (most precise, 2x memory)</option><option value="q8_0">q8_0</option>
+                    <option value="q5_1">q5_1</option><option value="q5_0">q5_0</option><option value="q4_1">q4_1</option><option value="q4_0">q4_0 (smallest)</option>
+                  </select>
+                </label>
+                <label class="field"><span class="field-label">Parallel requests</span><input name="model.parallel" type="number" min="1" placeholder="1"><small class="help">Each extra slot needs its own memory.</small></label>
+                <label class="field"><span class="field-label">CPU threads</span><input name="model.threads" type="number" min="0" placeholder="auto"></label>
+                <label class="field"><span class="field-label">Batch size</span><input name="model.batch_size" type="number" min="0" placeholder="2048"></label>
+                <label class="field"><span class="field-label">Micro-batch size</span><input name="model.ubatch_size" type="number" min="0" placeholder="auto"></label>
+                <label class="field"><span class="field-label">GPU prompt offload from (tokens)</span><input name="model.offload_min_batch" type="number" min="1" placeholder="128"><small class="help">Prompts this long send RAM-resident weights to the GPU.</small></label>
+              </div>
+              <label class="check"><input type="checkbox" name="model.qsa_blocks"><span><b>Experimental: whole-block sparse attention</b><small>Qwen3.8 models only. Less GPU memory at long contexts; answers can differ slightly from the reference model.</small></span></label>
+              <label class="field"><span class="field-label">Extra llama-server arguments</span>
+                <input name="model.extra_args" class="mono" placeholder="e.g. --load-mode mmap+mlock">
+              </label>
+            </div>
+          </details>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>API access</h2></div>
+          <div class="form-grid">
+            <label class="field global-only"><span class="field-label">Port</span><input name="port" type="number" min="1" max="65535"></label>
+            <label class="field global-only"><span class="field-label">Who can connect</span>
+              <select name="api_host">
+                <option value="127.0.0.1">Only this PC</option>
+                <option value="0.0.0.0">Other devices on my network</option>
+              </select>
+            </label>
+            <label class="field global-only"><span class="field-label">API key</span><input name="model.api_key" type="password" placeholder="none" autocomplete="new-password"><small class="help">Recommended when other devices can connect.</small></label>
+            <label class="field"><span class="field-label">Model name reported to clients</span><input name="model.alias" placeholder="file name"></label>
+          </div>
+          <p class="muted small global-only">Port and network changes take effect after restarting the app.</p>
+        </div>
+
+        <div class="card global-only">
+          <div class="card-head"><h2>App</h2></div>
+          <label class="check"><input type="checkbox" name="open_chat_on_ready"><span><b>Open the chat when a model is ready</b></span></label>
+          <label class="check"><input type="checkbox" name="exit_with_panel"><span><b>Quit when this window is closed</b><small>Otherwise the app keeps running in the system tray; right-click the tray icon to quit.</small></span></label>
+          <label class="field"><span class="field-label">Extra model folders</span>
+            <textarea name="extra_model_dirs" rows="3" placeholder="One folder per line"></textarea>
+          </label>
+          <details class="disclosure">
+            <summary>Advanced</summary>
+            <div class="disclosure-body">
+              <label class="field"><span class="field-label">llama-server location</span><input name="llama_server_path" class="mono" placeholder="auto-detect"></label>
+              <label class="field"><span class="field-label">Hugging Face token</span><input name="hf_token" type="password" placeholder="only needed for gated models" autocomplete="new-password"></label>
+            </div>
+          </details>
+        </div>
+
+        <!-- sticky save bar, shown only with unsaved changes -->
+        <div class="savebar" id="savebar" hidden>
+          <span>You have unsaved changes.</span>
+          <div class="savebar-actions">
+            <button type="button" id="settings-reset" class="btn btn-ghost">Discard</button>
+            <button type="submit" class="btn btn-primary">Save changes</button>
+          </div>
+        </div>
+      </form>
+    </section>
+  </main>
+</div>
+
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+
+<dialog id="confirm" class="dialog" aria-labelledby="confirm-title">
+  <form method="dialog">
+    <h2 id="confirm-title">Are you sure?</h2>
+    <p id="confirm-text" class="muted"></p>
+    <div class="dialog-actions">
+      <button value="cancel" class="btn btn-ghost">Cancel</button>
+      <button value="ok" id="confirm-ok" class="btn btn-primary">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

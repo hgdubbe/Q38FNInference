@@ -1,0 +1,106 @@
+package appconfig
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"testing"
+)
+
+func withTempConfigDir(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir) // os.UserConfigDir() honors this on linux
+}
+
+func TestSaveLoadRoundTrip(t *testing.T) {
+	withTempConfigDir(t)
+
+	cfg := Default()
+	cfg.LlamaServerPath = "/opt/llama/llama-server"
+	cfg.HFToken = "hf_test_token"
+	cfg.ExtraModelDirs = []string{"/mnt/models"}
+
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, cfg) {
+		t.Errorf("got %+v, want %+v", got, cfg)
+	}
+}
+
+func TestLoadMissingReturnsDefault(t *testing.T) {
+	withTempConfigDir(t)
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, Default()) {
+		t.Errorf("got %+v, want default %+v", got, Default())
+	}
+}
+
+func TestLocateLlamaServerPrefersConfigOverride(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "llama-server")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Default()
+	cfg.LlamaServerPath = bin
+	got := LocateLlamaServer(cfg)
+	if got != bin {
+		t.Errorf("got %q, want %q", got, bin)
+	}
+}
+
+func TestLocateLlamaServerReturnsEmptyWhenNotFound(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // empty PATH
+	cfg := Default()
+	cfg.LlamaServerPath = "/no/such/binary"
+	if got := LocateLlamaServer(cfg); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+func TestModelSettingsArgs(t *testing.T) {
+	temp, topK, seed := 0.6, 20, int64(42)
+	s := ModelSettings{Threads: 8, Temperature: &temp, TopK: &topK, Seed: &seed, Reasoning: "low", ExtraArgs: "--mlock  --no-mmap"}
+	got := s.Args()
+	want := []string{"--threads", "8", "--temp", "0.6", "--top-k", "20", "--seed", "42", "--mlock", "--no-mmap"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Args() = %v, want %v", got, want)
+	}
+	if len(ModelSettings{}.Args()) != 0 {
+		t.Error("zero settings must add no flags")
+	}
+}
+
+func TestModelSettingsEnv(t *testing.T) {
+	if got := (ModelSettings{}).Env(); !slices.Equal(got, []string{"GGML_OP_OFFLOAD_MIN_BATCH=128"}) {
+		t.Errorf("default Env() = %v", got)
+	}
+	got := ModelSettings{OffloadMinBatch: 64, QSABlocks: true}.Env()
+	if !slices.Equal(got, []string{"GGML_OP_OFFLOAD_MIN_BATCH=64", "LLAMA_QWEN4EXP_QSA_BLOCKS=1"}) {
+		t.Errorf("Env() = %v", got)
+	}
+}
+
+func TestModelForUsesOverride(t *testing.T) {
+	c := Default()
+	c.Model.CtxSize = 8192
+	c.ModelOverrides = map[string]ModelSettings{"big": {CtxSize: 32768}}
+	if got := c.ModelFor("big").CtxSize; got != 32768 {
+		t.Errorf("override: ctx %d, want 32768", got)
+	}
+	if got := c.ModelFor("other").CtxSize; got != 8192 {
+		t.Errorf("default: ctx %d, want 8192", got)
+	}
+}

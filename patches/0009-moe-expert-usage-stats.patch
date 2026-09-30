@@ -1,0 +1,192 @@
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 88851c6..57a1869 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -13,7 +13,14 @@
+ #include "llama-sampler.h"
+ #include "llama.h"
+ 
++#include <chrono>
+ #include <cinttypes>
++#include <cstdio>
++#include <cstdlib>
++#include <map>
++#include <mutex>
++#include <thread>
++#include <vector>
+ #include <cmath>
+ #include <cstring>
+ #include <limits>
+@@ -479,6 +486,131 @@ llama_context::llama_context(
+     }
+ }
+ 
++// LLAMA_EXPERT_STATS=<file>: count how often each MoE expert is routed to, per layer, separately
++// for prompt batches and for single-token generation, and keep <file> updated with the counts as
++// JSON (by a background thread, once a second while counts change). Shows whether a few experts per layer take most of the tokens,
++// i.e. whether keeping just those in VRAM would help. Costs one sync per batch while enabled.
++namespace {
++struct expert_stats {
++    std::mutex mtx;
++    std::string path;
++    std::map<int, std::vector<uint64_t>> gen, prompt; // layer -> hits per expert
++    uint64_t gen_tokens = 0, prompt_tokens = 0;
++    int64_t n_expert = 0;
++    bool dirty = false;
++    std::vector<uint8_t> buf;
++};
++
++void expert_stats_write(expert_stats & st);
++
++expert_stats * expert_stats_get() {
++    static expert_stats * st = []() -> expert_stats * {
++        const char * p = getenv("LLAMA_EXPERT_STATS");
++        if (p == nullptr || *p == 0) {
++            return nullptr;
++        }
++        auto * s = new expert_stats; // lives until exit: the file may be written up to the end
++        s->path = p;
++        LLAMA_LOG_INFO("%s: recording MoE expert usage to %s\n", __func__, p);
++        return s;
++    }();
++    static const bool flusher = [] {
++        if (st == nullptr) {
++            return false;
++        }
++        const auto flush = [] {
++            std::lock_guard<std::mutex> lock(st->mtx);
++            if (st->dirty) {
++                expert_stats_write(*st);
++                st->dirty = false;
++            }
++        };
++        std::thread([flush] {
++            for (;;) {
++                std::this_thread::sleep_for(std::chrono::seconds(1));
++                flush();
++            }
++        }).detach();
++        std::atexit([] {
++            std::lock_guard<std::mutex> lock(st->mtx);
++            if (st->dirty) {
++                expert_stats_write(*st);
++            }
++        });
++        return true;
++    }();
++    (void) flusher;
++    return st;
++}
++
++void expert_stats_write(expert_stats & st) {
++    const int64_t n_expert = st.n_expert;
++    const std::string tmp = st.path + ".tmp";
++    FILE * f = fopen(tmp.c_str(), "wb");
++    if (f == nullptr) {
++        return;
++    }
++    fprintf(f, "{\"n_expert\":%" PRId64 ",\"gen_tokens\":%" PRIu64 ",\"prompt_tokens\":%" PRIu64 ",\"layers\":[",
++            n_expert, st.gen_tokens, st.prompt_tokens);
++    bool first = true;
++    auto row = [&](const std::map<int, std::vector<uint64_t>> & m, int il) {
++        const auto it = m.find(il);
++        fputc('[', f);
++        for (int64_t e = 0; e < n_expert; e++) {
++            fprintf(f, "%s%" PRIu64, e ? "," : "", it == m.end() ? 0 : it->second[e]);
++        }
++        fputc(']', f);
++    };
++    std::map<int, bool> layers;
++    for (const auto & it : st.gen)    { layers[it.first] = true; }
++    for (const auto & it : st.prompt) { layers[it.first] = true; }
++    for (const auto & it : layers) {
++        fprintf(f, "%s{\"layer\":%d,\"gen\":", first ? "" : ",", it.first);
++        row(st.gen, it.first);
++        fputs(",\"prompt\":", f);
++        row(st.prompt, it.first);
++        fputc('}', f);
++        first = false;
++    }
++    fputs("]}\n", f);
++    fclose(f);
++    std::remove(st.path.c_str()); // rename doesn't replace on Windows
++    std::rename(tmp.c_str(), st.path.c_str());
++}
++
++void expert_stats_record(expert_stats & st, ggml_cgraph * gf, int64_t n_expert, bool prompt) {
++    static const char prefix[] = "ffn_moe_topk-";
++    std::lock_guard<std::mutex> lock(st.mtx);
++    st.n_expert = n_expert;
++    bool any = false;
++    for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
++        ggml_tensor * t = ggml_graph_node(gf, i);
++        if (t->type != GGML_TYPE_I32 || strncmp(t->name, prefix, sizeof(prefix) - 1) != 0) {
++            continue;
++        }
++        const int il = atoi(t->name + sizeof(prefix) - 1);
++        const size_t nbytes = ggml_nbytes(t);
++        st.buf.resize(nbytes);
++        ggml_backend_tensor_get(t, st.buf.data(), 0, nbytes);
++        auto & hits = (prompt ? st.prompt : st.gen)[il];
++        hits.resize(n_expert);
++        for (int64_t r = 0; r < t->ne[1]; r++) {
++            const int32_t * ids = (const int32_t *) (st.buf.data() + r*t->nb[1]);
++            for (int64_t k = 0; k < t->ne[0]; k++) {
++                if (ids[k] >= 0 && ids[k] < n_expert) {
++                    hits[ids[k]]++;
++                }
++            }
++        }
++        if (!any) {
++            (prompt ? st.prompt_tokens : st.gen_tokens) += t->ne[1];
++            any = true;
++        }
++    }
++    st.dirty = st.dirty || any;
++}
++} // namespace
++
+ llama_context::~llama_context() {
+     // wait for any pending asynchronous copies into the output buffers before they are freed
+     synchronize();
+@@ -1463,6 +1595,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+         return nullptr;
+     }
+ 
++    if (auto * st = expert_stats_get(); st != nullptr && model.hparams.n_expert > 0) {
++        ggml_backend_sched_synchronize(sched.get());
++        expert_stats_record(*st, res->get_gf(), model.hparams.n_expert, ubatch.n_tokens > 1);
++    }
++
+     ret = GGML_STATUS_SUCCESS;
+ 
+     return res;
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index a806126..f560a6d 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -18,6 +18,7 @@
+ 
+ #include <cassert>
+ #include <cmath>
++#include <cstdlib>
+ #include <cstring>
+ #include <numeric>
+ #include <sstream>
+@@ -2120,6 +2121,16 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     }
+     cb(selected_experts, "ffn_moe_topk", il);
+ 
++    // LLAMA_EXPERT_STATS (see llama-context.cpp) reads the selection after the graph ran, so it
++    // must keep its memory: outputs (and the tensor an output views) are never reused
++    static const bool expert_stats = getenv("LLAMA_EXPERT_STATS") != nullptr;
++    if (expert_stats) {
++        ggml_set_output(selected_experts);
++        if (selected_experts->view_src) {
++            ggml_set_output(selected_experts->view_src);
++        }
++    }
++
+     if (arch == LLM_ARCH_GROVEMOE && n_expert != hparams.n_expert) {
+         // TODO: Use scalar div instead when/if implemented
+         ggml_tensor * f_sel = ggml_cast(ctx0, selected_experts, GGML_TYPE_F32);
