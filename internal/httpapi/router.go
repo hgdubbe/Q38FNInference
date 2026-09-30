@@ -141,7 +141,7 @@ func (s *Server) planFor(rt *routerRun, path string) (*tuneResponse, error) {
 	if ok {
 		return p, nil
 	}
-	p, err = s.tuneWith(path, rt.gpus)
+	p, err = s.tuneWith(path, rt.gpus, false)
 	if err != nil {
 		return nil, err
 	}

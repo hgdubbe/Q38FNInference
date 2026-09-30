@@ -932,6 +932,7 @@ function renderPlan() {
   let summary;
   if (p.FullyOnGPU) summary = 'Everything fits on the GPU: fastest setup.';
   else if (!p.Devices || !p.Devices.length || p.NGpuLayers === 0) summary = 'Runs on the CPU only.';
+  else if (p.HotExperts) summary = `Most of the model runs on the GPU, with the busiest experts: they took ${Math.round(100 * p.HotShare)}% of the recorded expert traffic. The rest run from RAM.`;
   else if (p.NCPUMoE > 0 && p.NGpuLayers >= p.NCPUMoE) summary = `Most of the model runs on the GPU; the experts of ${p.NCPUMoE} layer${p.NCPUMoE > 1 ? 's' : ''} stay in RAM.`;
   else summary = 'Split between GPU and CPU: expect slower answers.';
   out.appendChild(callout(summary, p.NGpuLayers === 0 && state.gpus.length ? 'warn' : 'info'));
@@ -1010,6 +1011,13 @@ async function loadExpertStats() {
       `${p.name} · ${p.tokens.toLocaleString()} tokens` + (p.match ? ` · ${Math.round(100 * p.match)}% alike` : ''), p.name)));
     sel.value = s.profile;
   }
+  const hotSel = $('experts-hot');
+  hotSel.closest('label').hidden = !ms.hot_experts;
+  if (document.activeElement !== hotSel) {
+    hotSel.replaceChildren(new Option(`Auto (now: ${s.hot_resolved || s.profile})`, ''),
+      ...(s.profiles || []).map((p) => new Option(p.name, p.name)));
+    hotSel.value = s.hot_profile || '';
+  }
   const out = $('experts');
   let suggest = null;
   if (s.best && s.best !== s.profile) {
@@ -1057,6 +1065,15 @@ async function setExpertProfile(name) {
   loadExpertStats();
 }
 $('experts-profile').addEventListener('change', (e) => setExpertProfile(e.target.value));
+$('experts-hot').addEventListener('change', async (e) => {
+  if (!state.model) return;
+  try {
+    await api('POST', '/api/expert-stats', { model: state.model.path, hot_profile: e.target.value });
+    toast(state.status && state.status.Running ? 'Hot experts are loaded at start: restart the model to use this profile.' : 'Used from the next start.', 'ok', 3500);
+  } catch (err) { toast(err.message, 'error'); }
+  loadExpertStats();
+  computeTune();
+});
 $('experts-new-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const name = $('experts-new').value.trim();

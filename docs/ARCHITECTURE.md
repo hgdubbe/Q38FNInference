@@ -401,6 +401,41 @@ busiest 10/25/50% of experts, next to the even-spread baseline. If the
 busiest quarter takes at least half the tokens, hot-expert placement is
 worth building.
 
+## Hot experts
+
+`patches/0010-moe-hot-experts.patch` (`LLAMA_MOE_HOT=<file>`, one line per
+block: `<block>: <expert> <expert> ...`). After loading, llama.cpp copies the
+listed experts of each block whose expert tensors are in host memory into a
+new buffer on that block's GPU (plus their per-expert scales, and a small
+table mapping expert id to hot slot). `build_moe_ffn` then splits the
+routing: the GPU runs the hot copies with the non-hot choices' weights set
+to 0 (and a dummy slot), the CPU runs the full tensors with the hot choices'
+ids set to -1, which the CPU `MUL_MAT_ID` (generic and repacked) now skips,
+writing zero rows; the two results are added. Per-expert scales are looked
+up with the real ids on the CPU side. Only for batches below the op-offload
+threshold (`GGML_OP_OFFLOAD_MIN_BATCH`), since larger ones are copied to the
+GPU whole anyway; not for expert biases or LoRA. On the CPU build, with the
+split forced onto the CPU (`LLAMA_MOE_HOT_TEST=1`), greedy output is
+identical to the unsplit graph (2 and 16 experts, one/some/all hot, prompts
+split and unsplit). The CUDA side uses only existing ops (get_rows, cast,
+mul, sub, mul_mat_id on a smaller tensor) and is untested on hardware.
+
+Planner: with "Keep the most-used experts in GPU memory" and at least 1,000
+recorded tokens in the chosen profile, a plan that would keep experts in RAM
+instead keeps all of them there (`--n-cpu-moe` = block count) and fills each
+GPU's remaining budget with the most-used experts of the blocks on it, by
+recorded hits per byte (`pickHotExperts`). Whole blocks are a special case
+of that choice, so for skewed routing it covers more traffic in the same
+memory; the plan reports both shares. The hot list goes from the plan's
+command line (`--q38-moe-hot <file>`, removed before launch) into the
+environment. Hot experts come from their own profile choice, kept apart
+from the recording profile: a fixed profile only changes when it is also
+recorded into (routing doesn't depend on placement, so recording with hot
+experts on is still unbiased), and "auto" picks at each start the profile
+the latest session resembled most, else the recording profile if it has
+enough data, else the one with the most. Changing it needs a restart: the
+copies are made at load.
+
 ## Known limitations / open questions
 
 - Nothing here has been run against real Qwen3.8-Flash-Next weights or real

@@ -400,7 +400,7 @@ func (s *Server) tune(modelPath string) (*tuneResponse, error) {
 	if err != nil {
 		log.Printf("httpapi: GPU detection failed, planning CPU-only: %v", err)
 	}
-	return s.tuneWith(modelPath, s.withOwnUsage(gpus))
+	return s.tuneWith(modelPath, s.withOwnUsage(gpus), true)
 }
 
 // withOwnUsage adds back the VRAM our own running llama-server holds: a plan
@@ -434,12 +434,19 @@ func (s *Server) withOwnUsage(gpus []tuning.GPU) []tuning.GPU {
 	return out
 }
 
-func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU) (*tuneResponse, error) {
+// tuneWith plans a model for these GPUs; hot allows hot experts (not in
+// on-demand mode, whose presets can't carry the environment they need).
+func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU, hot bool) (*tuneResponse, error) {
 	meta, err := gguf.ReadModel(modelPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", modelPath, err)
 	}
 	ms := s.Config().ModelFor(modelName(modelPath))
+	var hits map[int][]uint64
+	hotFrom := ""
+	if hot && ms.HotExperts {
+		hits, hotFrom = s.expertHits(modelPath)
+	}
 	plan, err := tuning.Compute(meta, gpus, tuning.Options{
 		ExtraReserve: s.extraReserve(modelPath, gpus),
 		RequestedCtx: ms.CtxSize,
@@ -447,6 +454,7 @@ func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU) (*tuneResponse, e
 		CacheType:    ms.CacheType,
 		UBatch:       ms.UBatchSize,
 		NoOpOffload:  strings.Contains(" "+ms.ExtraArgs+" ", " --no-op-offload "),
+		ExpertHits:   hits,
 	})
 	if err != nil {
 		return nil, err
@@ -466,6 +474,17 @@ func (s *Server) tuneWith(modelPath string, gpus []tuning.GPU) (*tuneResponse, e
 		level = reasoning.High
 	}
 	args := append(plan.Args(modelPath), cacheRAMArgs(plan, mem)...)
+	if hot && ms.HotExperts && hits == nil {
+		plan.Notes = append(plan.Notes, fmt.Sprintf("hot experts: profile %q has fewer than %d recorded tokens; planning whole layers instead", hotFrom, minHotTokens))
+	}
+	if plan.HotExperts != nil {
+		plan.Notes = append(plan.Notes, fmt.Sprintf("hot experts chosen from expert-usage profile %q", hotFrom))
+		if f, err := writeHotExperts(modelPath, plan.HotExperts); err != nil {
+			plan.Notes = append(plan.Notes, "could not save the hot-expert list: "+err.Error())
+		} else {
+			args = append(args, hotExpertsFlag, f)
+		}
+	}
 	if ms.Alias == "" {
 		// without an alias llama-server reports the model as its file path, which for
 		// a split model is the path of part 1; use the id on-demand mode uses instead
@@ -637,6 +656,10 @@ func (s *Server) launch(modelPath string, args []string, devices []int, auto, re
 
 	ms := cfg.ModelFor(modelName(modelPath))
 	env := append([]string{"CUDA_DEVICE_ORDER=PCI_BUS_ID"}, ms.Env()...)
+	if f := flagValue(args, hotExpertsFlag); f != "" {
+		env = append(env, "LLAMA_MOE_HOT="+f)
+		args = stripFlags(args, hotExpertsFlag)
+	}
 	live := ""
 	if ms.ExpertStats {
 		if e, run, err := expertStatsEnv(modelPath, args); err != nil {

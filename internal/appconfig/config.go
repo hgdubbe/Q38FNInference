@@ -94,6 +94,10 @@ type ModelSettings struct {
 	// ExpertStats records how often each MoE expert is routed to
 	// (patches/0009, LLAMA_EXPERT_STATS; one-model mode only).
 	ExpertStats bool `json:"expert_stats,omitempty"`
+	// HotExperts plans all experts into RAM and fills the GPUs' spare
+	// memory with the most-used ones, from the active expert-usage profile
+	// (patches/0010, LLAMA_MOE_HOT; one-model mode only).
+	HotExperts bool `json:"hot_experts,omitempty"`
 
 	Temperature     *float64 `json:"temperature,omitempty"`
 	TopP            *float64 `json:"top_p,omitempty"`

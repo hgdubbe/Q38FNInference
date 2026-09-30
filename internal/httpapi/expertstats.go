@@ -511,6 +511,10 @@ type expertStatsResponse struct {
 	// when there are at least two to compare.
 	Best string `json:"best,omitempty"`
 	Live bool   `json:"live"` // the model is running and recording
+	// HotProfile is where hot experts come from ("" = auto), HotResolved
+	// the profile that choice means right now.
+	HotProfile  string `json:"hot_profile"`
+	HotResolved string `json:"hot_resolved"`
 }
 
 // expertStats reports the active profile's summary, every profile, and how
@@ -649,8 +653,9 @@ func (s *Server) expertLiveRun() string {
 // DELETE /api/expert-stats?model=<path>&profile=n  delete a profile's runs
 func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Model   string `json:"model"`
-		Profile string `json:"profile"`
+		Model      string  `json:"model"`
+		Profile    string  `json:"profile"`
+		HotProfile *string `json:"hot_profile"` // POST: set where hot experts come from ("" = auto)
 	}
 	if r.Method == http.MethodPost {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -682,6 +687,17 @@ func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodPost:
+		if req.HotProfile != nil {
+			if *req.HotProfile != "" && !validProfileName(*req.HotProfile) {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown profile %q", *req.HotProfile))
+				return
+			}
+			if err := os.WriteFile(filepath.Join(modelDir, "hot-profile"), []byte(*req.HotProfile), 0o644); err != nil {
+				writeErr(w, http.StatusInternalServerError, err)
+				return
+			}
+			break
+		}
 		if req.Profile == "" {
 			writeErr(w, http.StatusBadRequest, fmt.Errorf("profile is required"))
 			return
@@ -723,5 +739,121 @@ func (s *Server) handleExpertStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.Live = running != ""
+	resp.HotProfile = hotExpertProfile(modelDir)
+	resp.HotResolved = resp.HotProfile
+	if resp.HotResolved == "" {
+		resp.HotResolved = autoHotProfile(resp)
+	}
 	writeJSON(w, resp)
+}
+
+// hotExpertsFlag carries the hot-expert list file from the plan to launch,
+// which turns it into LLAMA_MOE_HOT; llama-server never sees it.
+const hotExpertsFlag = "--q38-moe-hot"
+
+// minHotTokens is how much recorded routing hot experts need.
+const minHotTokens = 1000
+
+// hotExpertProfile is the profile hot experts come from; "" means auto:
+// the one the latest session resembled most (else the recording profile).
+// Kept apart from the recording profile, so a profile used for hot experts
+// only changes when it is also recorded into.
+func hotExpertProfile(modelDir string) string {
+	b, err := os.ReadFile(filepath.Join(modelDir, "hot-profile"))
+	if name := strings.TrimSpace(string(b)); err == nil && validProfileName(name) {
+		return name
+	}
+	return ""
+}
+
+// autoHotProfile is what "auto" means: the profile the latest session
+// resembled most, else the recording profile if it has enough data, else the
+// profile with the most.
+func autoHotProfile(r expertStatsResponse) string {
+	if r.Best != "" {
+		return r.Best
+	}
+	pick, most := r.Profile, uint64(0)
+	for _, p := range r.Profiles {
+		if p.Name == r.Profile && p.Tokens >= minHotTokens {
+			return p.Name
+		}
+		if p.Tokens > most {
+			pick, most = p.Name, p.Tokens
+		}
+	}
+	return pick
+}
+
+// expertHits returns the routing counts per block and expert (generation,
+// else prompt) of the profile hot experts come from, and its name; nil if it
+// has too few recorded.
+func (s *Server) expertHits(modelPath string) (map[int][]uint64, string) {
+	modelDir, err := expertModelDir(modelPath)
+	if err != nil {
+		return nil, ""
+	}
+	migrateExpertStats(modelDir)
+	running := s.expertLiveRun()
+	if running != "" && filepath.Dir(filepath.Dir(running)) != modelDir {
+		running = ""
+	}
+	finalizeLiveRuns(modelDir, running)
+	profile := hotExpertProfile(modelDir)
+	if profile == "" {
+		r, err := expertStats(modelDir, running)
+		if err != nil {
+			return nil, ""
+		}
+		profile = autoHotProfile(r)
+	}
+	c := loadExpertCounts(filepath.Join(modelDir, profile), "")
+	if running != "" {
+		for _, st := range liveStretches(running) {
+			if st.profile == profile && (c.nExpert == 0 || st.counts.NExpert == c.nExpert) {
+				c.add(st.counts)
+			}
+		}
+	}
+	if c.genTokens+c.promptTokens < minHotTokens {
+		return nil, profile
+	}
+	counts, _ := c.routing()
+	return counts, profile
+}
+
+// writeHotExperts saves a plan's hot experts in patches/0010's format, one
+// "<block>: <expert> ..." line per block.
+func writeHotExperts(modelPath string, hot map[int][]int) (string, error) {
+	modelDir, err := expertModelDir(modelPath)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		return "", err
+	}
+	blocks := make([]int, 0, len(hot))
+	for b := range hot {
+		blocks = append(blocks, b)
+	}
+	sort.Ints(blocks)
+	var sb strings.Builder
+	for _, b := range blocks {
+		sb.WriteString(strconv.Itoa(b) + ":")
+		for _, e := range hot[b] {
+			sb.WriteString(" " + strconv.Itoa(e))
+		}
+		sb.WriteString("\n")
+	}
+	f := filepath.Join(modelDir, "hot-experts.txt")
+	return f, os.WriteFile(f, []byte(sb.String()), 0o644)
+}
+
+func flagValue(args []string, flag string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			return args[i+1]
+		}
+	}
+	return ""
 }

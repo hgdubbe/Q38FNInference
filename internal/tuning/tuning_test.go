@@ -319,3 +319,48 @@ func TestExtraReserveAndMarginMoveExpertsOffGPU(t *testing.T) {
 		t.Errorf("with margin ncmoe = %d, want %d", marg.NCPUMoE, base.NCPUMoE+1)
 	}
 }
+
+func TestHotExpertsReplaceWholeBlocks(t *testing.T) {
+	// 8 blocks x 8 experts of 128 MiB; the GPU has room for 24 experts
+	m := synthModel(8, 1*GiB, 10*MiB, 10*MiB)
+	m.KV["qwen4exp.expert_count"] = uint32(8)
+	free := overhead(true) + 3*GiB + 100*MiB
+	hits := map[int][]uint64{}
+	for b := 0; b < 8; b++ {
+		hits[b] = []uint64{70, 5, 5, 5, 5, 5, 3, 2}
+	}
+
+	p, err := Compute(m, []GPU{{Index: 0, FreeBytes: free}}, Options{NoOpOffload: true, UBatch: 512, ExpertHits: hits})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.NCPUMoE != 8 || p.NGpuLayers != 9 {
+		t.Fatalf("ncmoe=%d ngl=%d, want all experts in RAM (8) and 9 slots on GPU", p.NCPUMoE, p.NGpuLayers)
+	}
+	n := 0
+	for b, es := range p.HotExperts {
+		n += len(es)
+		if es[0] != 0 {
+			t.Errorf("block %d: busiest hot expert %d, want 0", b, es[0])
+		}
+	}
+	// expert 0 of all 8 blocks (560 hits) + 16 of the 5-hit ones (80) of 800
+	if n != 24 || p.HotBytes != 3*GiB || p.HotShare != 0.8 || p.WholeLayerShare != 0.375 {
+		t.Errorf("hot: %d experts, %d bytes, share %.3f (whole blocks %.3f); want 24, 3 GiB, 0.8, 0.375", n, p.HotBytes, p.HotShare, p.WholeLayerShare)
+	}
+}
+
+func TestHotExpertsFillSpareMemoryWhenAllExpertsAreInRAM(t *testing.T) {
+	// room for the dense part and 4 experts, not for a whole block's 8
+	m := synthModel(8, 1*GiB, 10*MiB, 10*MiB)
+	m.KV["qwen4exp.expert_count"] = uint32(8)
+	free := overhead(true) + 512*MiB + 100*MiB
+	hits := map[int][]uint64{0: {1, 1, 1, 1, 1, 1, 1, 90}}
+	p, err := Compute(m, []GPU{{Index: 0, FreeBytes: free}}, Options{NoOpOffload: true, UBatch: 512, ExpertHits: hits})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.NCPUMoE != 8 || p.WholeLayerShare != 0 || len(p.HotExperts[0]) != 4 || p.HotExperts[0][0] != 7 {
+		t.Errorf("ncmoe=%d hot=%v whole=%.2f, want 8, block 0's 4 busiest starting with 7, 0", p.NCPUMoE, p.HotExperts, p.WholeLayerShare)
+	}
+}

@@ -57,7 +57,9 @@ models go to `%APPDATA%\Q38FNInference\models`.
    between the defaults and one model's own settings (also reachable from
    the Run page's "Its settings" link). Under performance options, "Record
    expert usage" counts how evenly the model uses its MoE experts and shows
-   the result on the Run page (see docs/ARCHITECTURE.md).
+   the result on the Run page (see docs/ARCHITECTURE.md). "Keep the
+   most-used experts in GPU memory" then fills the GPUs with the busiest
+   experts from a chosen profile instead of whole layers.
 
 ## API
 

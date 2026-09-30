@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 
 	"github.com/hgdubbe/q38fninference/internal/gguf"
@@ -71,6 +72,13 @@ type Plan struct {
 	// memory-mapped and read a few rows per token, so they needn't fit in RAM.
 	InputBytes uint64
 	FullyOnGPU bool
+	// HotExperts lists, per block, the experts kept in VRAM besides the
+	// RAM-resident ones (patches/0010, LLAMA_MOE_HOT), busiest first.
+	HotExperts map[int][]int `json:",omitempty"`
+	HotBytes   uint64        `json:",omitempty"`
+	// HotShare is the share of the recorded expert traffic the hot experts
+	// took, WholeLayerShare what whole blocks' experts on GPU would have.
+	HotShare, WholeLayerShare float64 `json:",omitempty"`
 }
 
 // Options lets the caller override what would otherwise be auto-picked.
@@ -83,6 +91,11 @@ type Options struct {
 	ReserveBytes uint64
 	// UBatch forces the micro-batch size; 0 lets the planner pick.
 	UBatch int
+	// ExpertHits are recorded routing counts per block and expert. When
+	// experts must stay in RAM, the plan keeps every block's experts there
+	// and fills the GPUs' remaining memory with the most-used experts
+	// instead of whole blocks' experts (Plan.HotExperts).
+	ExpertHits map[int][]uint64
 	// NoOpOffload: llama-server runs with --no-op-offload, so RAM-resident
 	// weights are never copied to the GPU and need no staging VRAM.
 	NoOpOffload bool
@@ -296,6 +309,15 @@ func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 			plan.Notes = append(plan.Notes, "GPU too small to also stage RAM-resident weights for prompt processing: prompts are processed on the CPU for those layers (--no-op-offload)")
 		}
 	}
+	wholeNCPUMoE := nCPUMoE
+	hot := false
+	if len(opt.ExpertHits) > 0 && k == n+1 && nCPUMoE > 0 {
+		// hot experts: all experts in RAM, then the busiest ones back on GPU
+		st := stagingFor(slots, n, k, opt)
+		if _, ok := place(slots, n, k, deviceBudgets(gpus, opt, ub, st)); ok {
+			nCPUMoE, staging, hot = n, st, true
+		}
+	}
 	plan.StagingBytes = staging
 	budgets := deviceBudgets(gpus, opt, ub, staging)
 
@@ -314,6 +336,9 @@ func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 		}
 		plan.GPUFitBytes += plan.DeviceBytes[d]
 	}
+	if hot {
+		pickHotExperts(plan, slots, counts, budgets, m.NExpert(), opt.ExpertHits, wholeNCPUMoE)
+	}
 	plan.CPUFitBytes = plan.TotalBytes - plan.GPUFitBytes
 	if len(gpus) > 1 {
 		plan.TensorSplit = counts
@@ -323,6 +348,17 @@ func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 	switch {
 	case plan.FullyOnGPU:
 		plan.Notes = append(plan.Notes, "all weights and cache fit on GPU")
+	case k == n+1 && plan.HotExperts != nil:
+		nHot := 0
+		for _, e := range plan.HotExperts {
+			nHot += len(e)
+		}
+		plan.Notes = append(plan.Notes, fmt.Sprintf("the %d most-used experts (%.1f GiB) are kept in GPU memory; they took %.0f%% of the recorded expert traffic, where whole blocks' experts on GPU would have taken %.0f%%. All experts also stay in CPU RAM for the rest",
+			nHot, float64(plan.HotBytes)/GiB, 100*plan.HotShare, 100*plan.WholeLayerShare))
+		if staging > 0 {
+			plan.Notes = append(plan.Notes, fmt.Sprintf("%.1f GiB kept free on %s for copying RAM-resident experts to the GPU during long prompts; micro-batch %d so each copy serves more tokens",
+				float64(staging)/GiB, gpus[0].Name, ub))
+		}
 	case k == n+1:
 		plan.Notes = append(plan.Notes, fmt.Sprintf("MoE experts of the first %d/%d blocks stay in CPU RAM; attention, gated-delta-net and shared weights are all on GPU", nCPUMoE, n))
 		if staging > 0 {
@@ -400,6 +436,77 @@ func budgetNote(g GPU, main bool, opt Options, ub int, staging uint64) string {
 	}
 	left := int64(g.FreeBytes) - int64(used)
 	return out + fmt.Sprintf(" = %.1f GiB for model layers", float64(left)/GiB)
+}
+
+// pickHotExperts fills what each GPU has left after its blocks with the
+// most-used experts of those blocks (llama.cpp puts a block's hot experts on
+// the block's GPU), by recorded hits per byte.
+func pickHotExperts(plan *Plan, slots []slot, counts []int, budgets []int64, nExpert uint64, hits map[int][]uint64, wholeNCPUMoE int) {
+	n := len(slots) - 1
+	if nExpert == 0 {
+		return
+	}
+	free := make([]int64, len(budgets))
+	dev := make([]int, n) // block -> device, -1 if not on a GPU
+	for i := range dev {
+		dev[i] = -1
+	}
+	j := n + 1 - plan.NGpuLayers
+	for d, c := range counts {
+		free[d] = budgets[d] - int64(plan.DeviceBytes[d])
+		for i := 0; i < c; i++ {
+			if j < n {
+				dev[j] = d
+			}
+			j++
+		}
+	}
+
+	type cand struct {
+		block, expert int
+		hits          uint64
+		bytes         int64
+	}
+	var cands []cand
+	var total, whole uint64
+	for b, hs := range hits {
+		if b < 0 || b >= n || uint64(len(hs)) != nExpert {
+			continue
+		}
+		per := int64(slots[b].expert / nExpert)
+		for e, h := range hs {
+			total += h
+			if b >= wholeNCPUMoE {
+				whole += h
+			}
+			if h > 0 && dev[b] >= 0 && per > 0 {
+				cands = append(cands, cand{b, e, h, per})
+			}
+		}
+	}
+	if total == 0 {
+		return
+	}
+	sort.Slice(cands, func(a, b int) bool {
+		// hits per byte, highest first
+		return float64(cands[a].hits)/float64(cands[a].bytes) > float64(cands[b].hits)/float64(cands[b].bytes)
+	})
+	plan.HotExperts = map[int][]int{}
+	var covered uint64
+	for _, c := range cands {
+		d := dev[c.block]
+		if free[d] < c.bytes {
+			continue
+		}
+		free[d] -= c.bytes
+		plan.HotExperts[c.block] = append(plan.HotExperts[c.block], c.expert)
+		plan.DeviceBytes[d] += uint64(c.bytes)
+		plan.GPUFitBytes += uint64(c.bytes)
+		plan.HotBytes += uint64(c.bytes)
+		covered += c.hits
+	}
+	plan.HotShare = float64(covered) / float64(total)
+	plan.WholeLayerShare = float64(whole) / float64(total)
 }
 
 // stagingFor is the largest single block's worth of RAM-resident weights:

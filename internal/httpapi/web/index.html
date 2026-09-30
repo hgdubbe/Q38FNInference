@@ -164,9 +164,10 @@
           <h2>Expert usage</h2>
           <button id="experts-clear" class="btn btn-link">Clear this profile</button>
         </div>
-        <p class="muted small">Record separate profiles for different work (e.g. coding, chat). Recording goes into the selected one, from the moment you select it.</p>
+        <p class="muted small">Record separate profiles for different work (e.g. coding, chat). Recording goes into the selected one, from the moment you select it. Hot experts (Settings) are loaded at start from their own choice of profile, which only changes when it is recorded into.</p>
         <div class="row">
-          <label class="inline-field">Profile <select id="experts-profile"></select></label>
+          <label class="inline-field">Record into <select id="experts-profile"></select></label>
+          <label class="inline-field">Hot experts from <select id="experts-hot"></select></label>
           <form id="experts-new-form" class="row">
             <input id="experts-new" placeholder="new profile, e.g. coding" maxlength="40" aria-label="New profile name">
             <button class="btn btn-secondary btn-sm">Add</button>
@@ -358,6 +359,7 @@
               </div>
               <label class="check"><input type="checkbox" name="model.qsa_blocks"><span><b>Experimental: whole-block sparse attention</b><small>Qwen3.8 models only. Less GPU memory at long contexts; answers can differ slightly from the reference model.</small></span></label>
               <label class="check"><input type="checkbox" name="model.expert_stats"><span><b>Record expert usage</b><small>Counts which experts each token is routed to, to see whether keeping the busiest ones in VRAM would help. Shown on the Run page. One-model mode only; slightly slower while on.</small></span></label>
+              <label class="check"><input type="checkbox" name="model.hot_experts"><span><b>Keep the most-used experts in GPU memory</b><small>Uses the recorded expert usage (the profile selected on the Run page, at least 1,000 tokens): every expert stays in RAM, and the GPUs' spare memory holds the busiest ones instead of whole layers. The plan shows how much traffic they cover. One-model mode only; applies from the next start.</small></span></label>
               <label class="field"><span class="field-label">Extra llama-server arguments</span>
                 <input name="model.extra_args" class="mono" placeholder="e.g. --load-mode mmap+mlock">
               </label>
