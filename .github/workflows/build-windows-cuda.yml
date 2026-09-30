@@ -256,9 +256,11 @@ jobs:
              (http://127.0.0.1:8787). Running it again just reopens the panel.
           2. Models tab: pick a local GGUF or download one from Hugging Face.
           3. Run tab: check the GPU selection and launch plan, then Start.
-          4. Chat tab, or llama.cpp's web UI and the OpenAI-compatible API at
-             http://127.0.0.1:8080/v1 (streaming and non-streaming).
-          5. Quit (top right) stops the model and exits.
+          4. Open chat for llama.cpp's web UI, or point any OpenAI- or
+             Anthropic-compatible app at http://127.0.0.1:8080/v1.
+          5. Profiling tab: make a model that doesn't fit in GPU memory faster
+             (the Guide tab explains how).
+          6. Quit stops the model and exits.
 
           Requires an NVIDIA driver supporting CUDA 12.4 (R550 or newer).
           Settings and launcher.log live in %APPDATA%\Q38FNInference.
@@ -294,3 +296,18 @@ jobs:
             Q38FNInference-windows-x64-cuda12.zip
             q38fninference.exe
           fail_on_unmatched_files: true
+
+      - name: Prune old releases
+        if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # keep the 3 newest releases (this one and two to go back to); older
+          # releases and their tags are deleted
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 500 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName' |
+          while read -r tag; do
+            [ -n "$tag" ] && [ "$tag" != "$TAG" ] || continue
+            echo "deleting $tag"
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done

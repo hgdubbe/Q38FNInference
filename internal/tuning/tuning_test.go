@@ -374,3 +374,28 @@ func TestNegativeExtraReserveGivesMoreRoom(t *testing.T) {
 		t.Errorf("ncmoe %d with 1 GiB measured unused, want %d", more.NCPUMoE, base.NCPUMoE-1)
 	}
 }
+
+func TestHotExpertsUseEveryGPU(t *testing.T) {
+	// the first GPU holds all dense parts plus 8 experts; the second 8 more
+	m := synthModel(8, 1*GiB, 10*MiB, 10*MiB)
+	m.KV["qwen4exp.expert_count"] = uint32(8)
+	gpus := []GPU{
+		{Index: 0, FreeBytes: overhead(true) + 1*GiB + 100*MiB},
+		{Index: 1, FreeBytes: overhead(false) + 1*GiB + 50*MiB},
+	}
+	hits := map[int][]uint64{}
+	for b := 0; b < 8; b++ {
+		hits[b] = []uint64{70, 5, 5, 5, 5, 5, 3, 2}
+	}
+	p, err := Compute(m, gpus, Options{NoOpOffload: true, UBatch: 512, ExpertHits: hits})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.TensorSplit) != 2 || p.TensorSplit[1] == 0 {
+		t.Fatalf("split %v: the second GPU must get blocks to hold their hot experts", p.TensorSplit)
+	}
+	// 16 experts: expert 0 of all 8 blocks (560) + 8 of the 5-hit ones (40), of 800
+	if p.HotShare != 0.75 || p.HotBytes != 2*GiB {
+		t.Errorf("hot share %.3f bytes %d, want 0.75 and 2 GiB", p.HotShare, p.HotBytes)
+	}
+}

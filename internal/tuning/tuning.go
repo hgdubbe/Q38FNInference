@@ -20,6 +20,7 @@
 package tuning
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
 	"slices"
@@ -322,6 +323,11 @@ func Compute(m *gguf.Metadata, gpus []GPU, opt Options) (*Plan, error) {
 	budgets := deviceBudgets(gpus, opt, ub, staging)
 
 	counts, _ := place(slots, nCPUMoE, k, budgets)
+	if hot && len(gpus) > 1 {
+		// a block's hot experts go on the block's GPU, so filling the first
+		// GPU with every block would leave the others without any
+		counts = bestHotSplit(slots, nCPUMoE, k, counts, budgets, hotBlocks(slots, m.NExpert(), opt.ExpertHits))
+	}
 	plan.NGpuLayers = k
 	plan.NCPUMoE = nCPUMoE
 	plan.FlashAttn = true
@@ -512,6 +518,99 @@ func pickHotExperts(plan *Plan, slots []slot, counts []int, budgets []int64, nEx
 	}
 	plan.HotShare = float64(covered) / float64(total)
 	plan.WholeLayerShare = float64(whole) / float64(total)
+}
+
+// hotBlock is one block's recorded hits per expert, busiest first, and the
+// bytes one of its experts takes.
+type hotBlock struct {
+	hits []uint64
+	per  int64
+}
+
+func hotBlocks(slots []slot, nExpert uint64, hits map[int][]uint64) []hotBlock {
+	n := len(slots) - 1
+	out := make([]hotBlock, n)
+	if nExpert == 0 {
+		return out
+	}
+	for b, hs := range hits {
+		if b < 0 || b >= n || uint64(len(hs)) != nExpert {
+			continue
+		}
+		s := slices.Clone(hs)
+		slices.SortFunc(s, func(a, b uint64) int { return cmp.Compare(b, a) })
+		out[b] = hotBlock{hits: s, per: int64(slots[b].expert / nExpert)}
+	}
+	return out
+}
+
+// splitCoverage is how many recorded hits the hot experts would cover with
+// the slots split over the GPUs as counts; false if a GPU can't hold its
+// slots.
+func splitCoverage(slots []slot, blocks []hotBlock, nCPUMoE, k int, counts []int, budgets []int64) (uint64, bool) {
+	n := len(slots) - 1
+	j := n + 1 - k
+	var covered uint64
+	type cand struct {
+		hits uint64
+		per  int64
+	}
+	for d, c := range counts {
+		var used int64
+		var cands []cand
+		for i := 0; i < c; i++ {
+			used += int64(slots[j].bytes(j >= nCPUMoE))
+			if j < n && blocks[j].per > 0 {
+				for _, h := range blocks[j].hits {
+					if h > 0 {
+						cands = append(cands, cand{h, blocks[j].per})
+					}
+				}
+			}
+			j++
+		}
+		if used > budgets[d] {
+			return 0, false
+		}
+		slices.SortFunc(cands, func(a, b cand) int {
+			return cmp.Compare(float64(b.hits)/float64(b.per), float64(a.hits)/float64(a.per))
+		})
+		free := budgets[d] - used
+		for _, c := range cands {
+			if c.per <= free {
+				free -= c.per
+				covered += c.hits
+			}
+		}
+	}
+	return covered, true
+}
+
+// bestHotSplit tries the ways of splitting the slots over two or three GPUs
+// and keeps the one whose hot experts cover the most traffic (the ordered
+// fill, when nothing beats it).
+func bestHotSplit(slots []slot, nCPUMoE, k int, fill []int, budgets []int64, blocks []hotBlock) []int {
+	best := fill
+	bestCov, _ := splitCoverage(slots, blocks, nCPUMoE, k, fill, budgets)
+	try := func(counts []int) {
+		if cov, ok := splitCoverage(slots, blocks, nCPUMoE, k, counts, budgets); ok && cov > bestCov {
+			best, bestCov = slices.Clone(counts), cov
+		}
+	}
+	switch len(budgets) {
+	case 2:
+		for c0 := 0; c0 <= k; c0++ {
+			try([]int{c0, k - c0})
+		}
+	case 3:
+		step := max(1, k/24)
+		for c0 := 0; c0 <= k; c0 += step {
+			for c1 := 0; c0+c1 <= k; c1 += step {
+				try([]int{c0, c1, k - c0 - c1})
+			}
+		}
+	}
+	return best
 }
 
 // stagingFor is the largest single block's worth of RAM-resident weights:

@@ -435,7 +435,12 @@ Planner: with "Keep the most-used experts in GPU memory" and at least 1,000
 recorded tokens in the chosen profile, a plan that would keep experts in RAM
 instead keeps all of them there (`--n-cpu-moe` = block count) and fills each
 GPU's remaining budget with the most-used experts of the blocks on it, by
-recorded hits per byte (`pickHotExperts`). Whole blocks are a special case
+recorded hits per byte (`pickHotExperts`). Since a block's hot experts
+live on the block's GPU, the ordered fill (first GPU first) would put every
+block on the first GPU once only their non-expert parts are left, and the
+other GPUs would hold nothing; with two or three GPUs the planner instead
+tries the contiguous splits and keeps the one whose hot experts cover the
+most recorded traffic (`bestHotSplit`). Whole blocks are a special case
 of that choice, so for skewed routing it covers more traffic in the same
 memory; the plan reports both shares. The hot list goes from the plan's
 command line (`--q38-moe-hot <file>`, removed before launch) into the
